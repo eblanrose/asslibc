@@ -10,7 +10,7 @@ LIB        = libasslibc.a
 
 TESTS      = test_hash test_aes test_bn test_rsa test_dh test_ecc test_x509 \
              test_ssl test_tls13 test_tls12 test_ssl3 test_tls_pipe test_x509_chain \
-             test_verify
+             test_verify test_negative test_x509_strict test_x509_crl
 
 TEST_BINS  = $(addprefix $(TEST_DIR)/,$(TESTS))
 
@@ -38,14 +38,16 @@ fuzz: $(FUZZ_BINS)
 $(FUZZ_DIR)/%: $(FUZZ_DIR)/%.c
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer,address,undefined -o $@ $< $(SRC_FILES) $(LDFLAGS)
 
-# Address/UB-sanitized regression run of the unit suites.
+ASAN_CC    ?= clang
+ASAN_FLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer
 asan-test:
+	@command -v $(ASAN_CC) >/dev/null || { echo "asan-test: $(ASAN_CC) not found"; exit 1; }
 	@set -e; for t in $(TESTS); do \
-	    $(CC) $(CFLAGS) $(CPPFLAGS) -fsanitize=address,undefined -o test/asan-$$t test/$$t.c $(SRC_FILES) $(LDFLAGS); \
+	    $(ASAN_CC) $(CFLAGS) $(CPPFLAGS) $(ASAN_FLAGS) -o test/asan-$$t test/$$t.c $(SRC_FILES) $(LDFLAGS); \
 	done; \
 	for t in $(TESTS); do \
 	    echo "--- asan $$t"; \
-	    ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 ./test/asan-$$t; \
+	    ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./test/asan-$$t; \
 	done; \
 	echo "ALL ASAN TEST SUITES PASSED"
 
@@ -73,7 +75,9 @@ ecc.o: ecc.c asslibc.h
 rsa_keygen.o: rsa_keygen.c rsa_keygen.h asslibc.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
-$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB) asslibc.h
+HDRS = asslibc.h ssl.h x509.h asn1.h
+
+$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB) $(HDRS)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
 lib: $(LIB)

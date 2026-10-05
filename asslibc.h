@@ -236,8 +236,10 @@ int assl_bn_to_bin_ct(const assl_bn *a, uint8_t *bin, size_t len);
 void assl_rng_seed(uint64_t seed);
 uint64_t assl_rng_next(void);
 void assl_rng_bytes(uint8_t *out, size_t len);
-void assl_rng_bytes_nonzero(uint8_t *out, size_t len);
+int assl_rng_bytes_nonzero(uint8_t *out, size_t len);
 int assl_rng_is_secure(void);
+
+int assl_rng_bytes_checked(uint8_t *out, size_t len);
 int assl_bn_rand(assl_bn *r, unsigned bits);
 
 #define ASSL_DH_FFDHE2048 0

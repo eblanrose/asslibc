@@ -107,6 +107,8 @@ typedef struct {
     const uint8_t *san_ip[8];
     size_t san_ip_len[8];
     size_t san_ip_count;
+
+    int has_unknown_critical;
 } assl_x509_cert;
 
 int assl_x509_parse(assl_x509_cert *cert, const uint8_t *der, size_t len);
@@ -129,6 +131,11 @@ typedef struct {
     size_t len[8];
     size_t count;
     int strict; 
+
+    const uint8_t *crl_der[8];
+    size_t crl_len[8];
+    size_t crl_count;
+    int check_revocation;
 } assl_x509_trust_store;
 
 #define ASSL_X509_MAX_CHAIN 8
@@ -136,6 +143,46 @@ typedef struct {
 int assl_x509_verify_chain(const uint8_t *const *chain, const size_t *chain_len,
                            size_t chain_cnt, const assl_x509_trust_store *store,
                            const char *hostname, int64_t now);
+
+
+
+#define ASSL_X509_MAX_REVOKED 512
+
+typedef struct {
+    uint8_t serial[20];
+    size_t  serial_len;
+} assl_x509_revoked;
+
+typedef struct {
+    const uint8_t *der;
+    size_t der_len;
+
+    assl_x509_dn issuer;
+    int64_t  this_update;
+    int64_t  next_update;
+    int      has_next_update;
+
+    assl_x509_sigalgo_t sig_algo;
+    assl_hash_t hash_algo;
+
+    const uint8_t *tbs;
+    size_t   tbs_len;
+    const uint8_t *signature;
+    size_t   sig_len;
+
+    assl_x509_revoked revoked[ASSL_X509_MAX_REVOKED];
+    size_t   revoked_count;
+    int      revoked_truncated;
+} assl_x509_crl;
+
+int assl_x509_crl_parse(assl_x509_crl *crl, const uint8_t *der, size_t len);
+
+int assl_x509_crl_check(const assl_x509_crl *crl,
+                        const assl_rsa_key *issuer_key,
+                        const assl_x509_dn *expected_issuer,
+                        int64_t now);
+
+int assl_x509_crl_is_revoked(const assl_x509_crl *crl, const assl_x509_cert *cert);
 
 
 typedef struct {

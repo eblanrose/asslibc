@@ -28,7 +28,8 @@ int main(int argc, char **argv) {
     if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { perror("connect"); return 1; }
 
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 1);
+        assl_ssl_init(&ssl, 1);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, want_version);
 
     fprintf(stderr, "interop_client: handshaking as client...\n");

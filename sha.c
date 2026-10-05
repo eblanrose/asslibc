@@ -439,38 +439,57 @@ void assl_sha384_final(assl_sha512_ctx *c, uint8_t out[48]) {
     memcpy(out, all, 48);
 }
 
+static void h_md5_init(void *c)                              { assl_md5_init((assl_md5_ctx *)c); }
+static void h_md5_update(void *c, const void *d, size_t n)   { assl_md5_update((assl_md5_ctx *)c, d, n); }
+static void h_md5_final(void *c, void *o)                    { assl_md5_final((assl_md5_ctx *)c, (uint8_t *)o); }
+
+static void h_sha1_init(void *c)                             { assl_sha1_init((assl_sha1_ctx *)c); }
+static void h_sha1_update(void *c, const void *d, size_t n)  { assl_sha1_update((assl_sha1_ctx *)c, d, n); }
+static void h_sha1_final(void *c, void *o)                   { assl_sha1_final((assl_sha1_ctx *)c, (uint8_t *)o); }
+
+static void h_sha256_init(void *c)                           { assl_sha256_init((assl_sha256_ctx *)c); }
+static void h_sha256_update(void *c, const void *d, size_t n){ assl_sha256_update((assl_sha256_ctx *)c, d, n); }
+static void h_sha256_final(void *c, void *o)                 { assl_sha256_final((assl_sha256_ctx *)c, (uint8_t *)o); }
+
+static void h_sha384_init(void *c)                           { assl_sha384_init((assl_sha512_ctx *)c); }
+static void h_sha512_update(void *c, const void *d, size_t n){ assl_sha512_update((assl_sha512_ctx *)c, d, n); }
+static void h_sha384_final(void *c, void *o)                 { assl_sha384_final((assl_sha512_ctx *)c, (uint8_t *)o); }
+
+static void h_sha512_init(void *c)                           { assl_sha512_init((assl_sha512_ctx *)c); }
+static void h_sha512_final(void *c, void *o)                 { assl_sha512_final((assl_sha512_ctx *)c, (uint8_t *)o); }
+
 static assl_hash_ops assl_hash_ops_table[ASSL_H_COUNT];
 static int assl_hash_ops_ready;
 
 static void assl_hash_ops_ensure(void) {
     if (assl_hash_ops_ready) return;
-    assl_hash_ops_table[ASSL_H_MD5].init = (void (*)(void *))assl_md5_init;
-    assl_hash_ops_table[ASSL_H_MD5].update = (void (*)(void *, const void *, size_t))assl_md5_update;
-    assl_hash_ops_table[ASSL_H_MD5].final = (void (*)(void *, void *))assl_md5_final;
+    assl_hash_ops_table[ASSL_H_MD5].init = h_md5_init;
+    assl_hash_ops_table[ASSL_H_MD5].update = h_md5_update;
+    assl_hash_ops_table[ASSL_H_MD5].final = h_md5_final;
     assl_hash_ops_table[ASSL_H_MD5].block_size = 64;
     assl_hash_ops_table[ASSL_H_MD5].out_size = 16;
 
-    assl_hash_ops_table[ASSL_H_SHA1].init = (void (*)(void *))assl_sha1_init;
-    assl_hash_ops_table[ASSL_H_SHA1].update = (void (*)(void *, const void *, size_t))assl_sha1_update;
-    assl_hash_ops_table[ASSL_H_SHA1].final = (void (*)(void *, void *))assl_sha1_final;
+    assl_hash_ops_table[ASSL_H_SHA1].init = h_sha1_init;
+    assl_hash_ops_table[ASSL_H_SHA1].update = h_sha1_update;
+    assl_hash_ops_table[ASSL_H_SHA1].final = h_sha1_final;
     assl_hash_ops_table[ASSL_H_SHA1].block_size = 64;
     assl_hash_ops_table[ASSL_H_SHA1].out_size = 20;
 
-    assl_hash_ops_table[ASSL_H_SHA256].init = (void (*)(void *))assl_sha256_init;
-    assl_hash_ops_table[ASSL_H_SHA256].update = (void (*)(void *, const void *, size_t))assl_sha256_update;
-    assl_hash_ops_table[ASSL_H_SHA256].final = (void (*)(void *, void *))assl_sha256_final;
+    assl_hash_ops_table[ASSL_H_SHA256].init = h_sha256_init;
+    assl_hash_ops_table[ASSL_H_SHA256].update = h_sha256_update;
+    assl_hash_ops_table[ASSL_H_SHA256].final = h_sha256_final;
     assl_hash_ops_table[ASSL_H_SHA256].block_size = 64;
     assl_hash_ops_table[ASSL_H_SHA256].out_size = 32;
 
-    assl_hash_ops_table[ASSL_H_SHA384].init = (void (*)(void *))assl_sha384_init;
-    assl_hash_ops_table[ASSL_H_SHA384].update = (void (*)(void *, const void *, size_t))assl_sha512_update;
-    assl_hash_ops_table[ASSL_H_SHA384].final = (void (*)(void *, void *))assl_sha384_final;
+    assl_hash_ops_table[ASSL_H_SHA384].init = h_sha384_init;
+    assl_hash_ops_table[ASSL_H_SHA384].update = h_sha512_update;
+    assl_hash_ops_table[ASSL_H_SHA384].final = h_sha384_final;
     assl_hash_ops_table[ASSL_H_SHA384].block_size = 128;
     assl_hash_ops_table[ASSL_H_SHA384].out_size = 48;
 
-    assl_hash_ops_table[ASSL_H_SHA512].init = (void (*)(void *))assl_sha512_init;
-    assl_hash_ops_table[ASSL_H_SHA512].update = (void (*)(void *, const void *, size_t))assl_sha512_update;
-    assl_hash_ops_table[ASSL_H_SHA512].final = (void (*)(void *, void *))assl_sha512_final;
+    assl_hash_ops_table[ASSL_H_SHA512].init = h_sha512_init;
+    assl_hash_ops_table[ASSL_H_SHA512].update = h_sha512_update;
+    assl_hash_ops_table[ASSL_H_SHA512].final = h_sha512_final;
     assl_hash_ops_table[ASSL_H_SHA512].block_size = 128;
     assl_hash_ops_table[ASSL_H_SHA512].out_size = 64;
 

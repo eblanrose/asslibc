@@ -85,7 +85,8 @@ int main(int argc, char **argv) {
     setup_key(&key);
 
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 0);
+        assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, want_version);
     assl_ssl_set_cert(&ssl, cert, cert_len, &key);
 

@@ -76,9 +76,9 @@ static void chain_case(const char *name, const uint8_t *const *chain,
 
 int main(void) {
     assl_rsa_key root_key, mid_key, leaf_key;
-    gen_rsa_key(&root_key, 1024);
-    gen_rsa_key(&mid_key, 1024);
-    gen_rsa_key(&leaf_key, 1024);
+    gen_rsa_key(&root_key, 2048);
+    gen_rsa_key(&mid_key, 2048);
+    gen_rsa_key(&leaf_key, 2048);
 
     uint8_t r1 = 1, r2 = 2, r3 = 3;
 

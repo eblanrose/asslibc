@@ -15,14 +15,14 @@ static void t_hex(const char *what, assl_bn *a, const char *want) {
     char got[16384];
     if (assl_bn_to_hex(a, got, sizeof got) < 0) {
         printf("    FAIL %s (to_hex)\n", what);
-        utest_failures++;
-        utest_checks++;
+        utest_fail();
+        utest_checks++; utest_total_checks++;
     } else if (strcmp(got, want) != 0) {
         printf("    FAIL %s: got %s want %s\n", what, got, want);
-        utest_failures++;
-        utest_checks++;
+        utest_fail();
+        utest_checks++; utest_total_checks++;
     } else {
-        utest_checks++;
+        utest_checks++; utest_total_checks++;
     }
 }
 
@@ -291,7 +291,7 @@ static void t_eq_bn(const char *what, assl_bn *a, assl_bn *b) {
         assl_bn_to_hex(a, ha, sizeof ha);
         assl_bn_to_hex(b, hb, sizeof hb);
         printf("    FAIL %s: got %s want %s\n", what, ha, hb);
-        utest_failures++;
+        utest_fail();
     }
     utest_checks++;
 }
@@ -495,7 +495,7 @@ static void test_bn_ct(void) {
                 char got[768];
                 assl_bn_to_hex(&a, got, sizeof got);
                 printf("    FAIL ct to_bin==to_bin: a=%s len=%zu\n", got, len);
-                utest_failures++;
+                utest_fail();
             }
             utest_checks++;
         }
@@ -514,7 +514,6 @@ int main(void) {
     test_bn_rsa();
     test_bn_random();
     test_bn_ct();
-    n += utest_failures;
-    if (n == 0) printf("ALL BN TESTS PASSED\n");
-    return n ? 1 : 0;
+    (void)n;
+    return utest_finish("BN");
 }

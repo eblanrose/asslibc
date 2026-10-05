@@ -47,8 +47,9 @@ int assl_dh_keygen(const assl_bn *p, const assl_bn *g, assl_bn *priv, assl_bn *p
     uint8_t buf[512];
     size_t nb = (assl_bn_bitlen(p) + 7) / 8;
     if (!p || !g || !priv || !pub || nb > sizeof buf) return -1;
+    if (!assl_rng_is_secure()) return -1;
     do {
-        assl_rng_bytes(buf, nb);
+        if (assl_rng_bytes_checked(buf, nb)) return -1;
         if (assl_bn_from_bin(priv, buf, nb)) return -1;
         if (assl_bn_is_zero(priv) || assl_bn_is_one(priv)) continue;
         if (assl_bn_cmp(priv, p) >= 0) continue;

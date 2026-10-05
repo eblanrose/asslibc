@@ -657,7 +657,7 @@ int assl_bn_rand(assl_bn *r, unsigned bits) {
     uint8_t *buf = malloc(nb ? nb : 1);
     if (!buf) return -1;
     if (assl_bn_reserve(r, (bits + 31) / 32)) { free(buf); return -1; }
-    assl_rng_bytes(buf, nb);
+    if (assl_rng_bytes_checked(buf, nb)) { free(buf); return -1; }
     if (assl_bn_from_bin(r, buf, nb)) { free(buf); return -1; }
     free(buf);
     if (bits == 0) return assl_bn_set_u32(r, 0);

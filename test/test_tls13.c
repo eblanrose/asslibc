@@ -51,7 +51,8 @@ typedef struct {
 static void *server_thread(void *arg) {
     thread_arg *ta = arg;
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 0);
+        assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, ta->version);
     assl_ssl_set_cert(&ssl, dummy_cert, sizeof dummy_cert, ta->key);
     ta->result = assl_ssl_handshake(&ssl, ta->fd, ta->fd);
@@ -77,7 +78,8 @@ static int test_version(uint16_t version, const char *name) {
     pthread_create(&tid, NULL, server_thread, &ta);
 
     assl_ssl client_ssl;
-    assl_ssl_init(&client_ssl, 1);
+        assl_ssl_init(&client_ssl, 1);
+    assl_ssl_set_verify(&client_ssl, 0, NULL);
     assl_ssl_set_version(&client_ssl, version);
     assl_ssl_set_cert(&client_ssl, dummy_cert, sizeof dummy_cert, &k);
 
@@ -116,7 +118,8 @@ static int test_tls13_hkdf_label(void) {
 static int test_tls13_version(void) {
     utest_begin("tls13-version");
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 1);
+        assl_ssl_init(&ssl, 1);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, TLS13_VERSION);
     utest_bool(ssl.version == TLS13_VERSION, "version_set");
     utest_bool(assl_ssl_get_version(&ssl) == TLS13_VERSION, "get_version");
@@ -126,7 +129,8 @@ static int test_tls13_version(void) {
 static int test_tls13_init(void) {
     utest_begin("tls13-init");
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 0);
+        assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     utest_bool(ssl.is_client == 0, "is_server");
     utest_bool(ssl.state == SSL3_STATE_INIT, "state_init");
     utest_bool(ssl.hs_sha256_active == 0, "sha256_not_active");

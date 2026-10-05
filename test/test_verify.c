@@ -103,6 +103,8 @@ static void run_client(assl_rsa_key *server_key, const uint8_t *srv_der,
     if (verify) {
         assl_ssl_set_verify(&ssl, 1, hostname);
         if (root_der) assl_ssl_add_trust(&ssl, root_der, root_len);
+    } else {
+        assl_ssl_set_verify(&ssl, 0, NULL);
     }
     int rc = assl_ssl_handshake(&ssl, s2c[0], c2s[1]);
     if (rc == 0) {
@@ -120,8 +122,8 @@ static void run_client(assl_rsa_key *server_key, const uint8_t *srv_der,
 
 int main(void) {
     assl_rsa_key root_key, srv_key;
-    setup_key(&root_key, 1024);
-    setup_key(&srv_key, 1024);
+    setup_key(&root_key, 2048);
+    setup_key(&srv_key, 2048);
 
     size_t root_len, srv_len;
     uint8_t *root_der = gen_cert(&root_key, &root_key, NULL, "test-root", 1, 1, &root_len);
@@ -150,5 +152,5 @@ int main(void) {
     free(srv_der);
     assl_rsa_free(&root_key);
     assl_rsa_free(&srv_key);
-    return 0;
+    return utest_finish("VERIFY");
 }

@@ -118,7 +118,8 @@ int assl_bn_is_prime(const assl_bn *n, int confidence) {
 }
 
 int assl_rsa_keygen(assl_rsa_key *k, unsigned bits) {
-    if (bits < 512 || bits > 4096 || bits % 2 != 0) return -1;
+    if (bits < 2048 || bits > 4096 || bits % 2 != 0) return -1;
+    if (!assl_rng_is_secure()) return -1;
 
     assl_bn p, q, n, e, d, phi, p1, q1;
     assl_bn_init(&p); assl_bn_init(&q); assl_bn_init(&n);
@@ -128,7 +129,12 @@ int assl_rsa_keygen(assl_rsa_key *k, unsigned bits) {
     unsigned half = bits / 2;
 
     while (1) {
-        assl_bn_rand(&p, half);
+        if (assl_bn_rand(&p, half)) {
+            assl_bn_free(&p); assl_bn_free(&q); assl_bn_free(&n);
+            assl_bn_free(&e); assl_bn_free(&d); assl_bn_free(&phi);
+            assl_bn_free(&p1); assl_bn_free(&q1);
+            return -1;
+        }
         size_t tw = (half + 31) / 32 - 1;
         uint32_t msk = 1u << ((half - 1) % 32);
         p.d[tw] |= msk;
@@ -138,7 +144,12 @@ int assl_rsa_keygen(assl_rsa_key *k, unsigned bits) {
         if (assl_bn_is_prime(&p, 20)) break;
     }
     while (1) {
-        assl_bn_rand(&q, half);
+        if (assl_bn_rand(&q, half)) {
+            assl_bn_free(&p); assl_bn_free(&q); assl_bn_free(&n);
+            assl_bn_free(&e); assl_bn_free(&d); assl_bn_free(&phi);
+            assl_bn_free(&p1); assl_bn_free(&q1);
+            return -1;
+        }
         size_t tw = (half + 31) / 32 - 1;
         uint32_t msk = 1u << ((half - 1) % 32);
         q.d[tw] |= msk;

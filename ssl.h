@@ -80,6 +80,8 @@
 #define SSL3_VERIFY_DATA_LEN   12
 #define SSL3_RANDOM_LEN        32
 
+#define SSL3_RECORD_EOF        (-2)
+
 #define TLS13_MAX_RECORD_LEN   16384
 #define TLS13_HANDSHAKE_PREFIX  16  /* content_type(1) + legacy_record_version(2) + length(2) = 5
                                        inner content type is 1 extra byte in the inner plaintext */
@@ -182,6 +184,9 @@ typedef struct {
     uint8_t client_session_id[32];
     uint8_t client_session_id_len;
 
+    uint16_t client_suites[16];
+    size_t client_suites_count;
+
     int verify_peer;                 
     char verify_hostname[256];       
     int verify_hostname_len;
@@ -189,6 +194,11 @@ typedef struct {
 
     uint8_t wbuf[SSL3_MAX_RECORD_LEN + SSL3_HEADER_LEN + 256];
     size_t wbuf_len;
+
+    uint8_t app_buf[SSL3_MAX_RECORD_LEN + 256];
+    size_t app_len;
+    size_t app_off;
+    int close_notify_received;
 } assl_ssl;
 
 void assl_ssl_init(assl_ssl *ssl, int is_client);
@@ -201,6 +211,7 @@ void assl_ssl_set_cert(assl_ssl *ssl, const uint8_t *der, size_t der_len,
 int assl_ssl_set_verify(assl_ssl *ssl, int enable, const char *hostname);
 
 int assl_ssl_add_trust(assl_ssl *ssl, const uint8_t *der, size_t len);
+
 
 int assl_ssl_handshake(assl_ssl *ssl, int in_fd, int out_fd);
 

@@ -373,7 +373,6 @@ int main(void) {
     test_chacha20();
     test_poly1305();
     test_chachapoly();
-    n += utest_failures;
-    if (n == 0) printf("ALL AES TESTS PASSED\n");
-    return n ? 1 : 0;
+    (void)n;
+    return utest_finish("AES");
 }

@@ -285,10 +285,5 @@ int main(void) {
     test_hkdf();
     test_tls13_label();
     test_prf();
-    if (utest_failures > 0) {
-        printf("OVERALL: FAILURES\n");
-        return 1;
-    }
-    printf("ALL HASH TESTS PASSED\n");
-    return 0;
+    return utest_finish("HASH");
 }

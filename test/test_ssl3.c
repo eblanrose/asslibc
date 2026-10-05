@@ -50,7 +50,8 @@ typedef struct {
 static void *server_thread(void *arg) {
     ssl3_thread_arg *ta = arg;
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 0);
+        assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, SSL3_VERSION);
     assl_ssl_set_cert(&ssl, dummy_cert, sizeof dummy_cert, ta->key);
     ta->result = assl_ssl_handshake(&ssl, ta->fd, ta->fd);
@@ -66,7 +67,8 @@ static void *server_thread(void *arg) {
 static int test_ssl3_init(void) {
     utest_begin("ssl3-init");
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 1);
+        assl_ssl_init(&ssl, 1);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, SSL3_VERSION);
     utest_bool(ssl.version == SSL3_VERSION, "version_ssl3");
     utest_bool(ssl.is_client == 1, "is_client");
@@ -87,7 +89,8 @@ static int test_ssl3_handshake(void) {
     pthread_create(&tid, NULL, server_thread, &ta);
 
     assl_ssl client_ssl;
-    assl_ssl_init(&client_ssl, 1);
+        assl_ssl_init(&client_ssl, 1);
+    assl_ssl_set_verify(&client_ssl, 0, NULL);
     assl_ssl_set_version(&client_ssl, SSL3_VERSION);
     assl_ssl_set_cert(&client_ssl, dummy_cert, sizeof dummy_cert, &k);
 

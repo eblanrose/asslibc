@@ -99,7 +99,7 @@ int assl_rsa_encrypt(const assl_rsa_key *k, const uint8_t *in, size_t inlen, uin
     if (!em) return -1;
     em[0] = 0x00;
     em[1] = 0x02;
-    assl_rng_bytes_nonzero(em + 2, pslen);
+    if (assl_rng_bytes_nonzero(em + 2, pslen)) { free(em); return -1; }
     em[2 + pslen] = 0x00;
     memcpy(em + 3 + pslen, in, inlen);
     int r = assl_rsa_public(k, em, ksz, out);
@@ -252,7 +252,7 @@ int assl_rsa_sign_pss(const assl_rsa_key *k, assl_hash_t h, const uint8_t *diges
     if (saltlen > 0) {
         salt = (uint8_t *)malloc(saltlen);
         if (!salt) return -1;
-        assl_rng_bytes(salt, saltlen);
+        if (assl_rng_bytes_checked(salt, saltlen)) { free(salt); return -1; }
     }
     size_t emLen = ksz;
     uint8_t *db = (uint8_t *)malloc(emLen - hlen - 1);

@@ -49,7 +49,8 @@ typedef struct {
 static void *server_thread(void *arg) {
     thread_arg *ta = arg;
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 0);
+        assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_cert(&ssl, dummy_cert, sizeof dummy_cert, ta->key);
     ta->result = assl_ssl_handshake(&ssl, ta->fd, ta->fd);
     if (ta->result == 0) {
@@ -66,7 +67,8 @@ static void *server_thread(void *arg) {
 static int test_ssl_init(void) {
     utest_begin("ssl-init");
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 1);
+        assl_ssl_init(&ssl, 1);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     utest_bool(ssl.is_client == 1, "is_client");
     utest_bool(ssl.state == SSL3_STATE_INIT, "state_init");
     utest_bool(ssl.write_seq_num == 0, "seq_zero");
@@ -86,7 +88,8 @@ static int test_ssl_handshake(void) {
     pthread_create(&tid, NULL, server_thread, &ta);
 
     assl_ssl client_ssl;
-    assl_ssl_init(&client_ssl, 1);
+        assl_ssl_init(&client_ssl, 1);
+    assl_ssl_set_verify(&client_ssl, 0, NULL);
     assl_ssl_set_cert(&client_ssl, dummy_cert, sizeof dummy_cert, &k);
 
     int cr = assl_ssl_handshake(&client_ssl, sv[0], sv[0]);

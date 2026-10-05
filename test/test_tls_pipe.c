@@ -51,7 +51,8 @@ typedef struct {
 static void *pipe_server_thread(void *arg) {
     pipe_thread_arg *ta = arg;
     assl_ssl ssl;
-    assl_ssl_init(&ssl, 0);
+        assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, ta->version);
     assl_ssl_set_cert(&ssl, dummy_cert, sizeof dummy_cert, ta->key);
     ta->result = assl_ssl_handshake(&ssl, ta->rd_fd, ta->wr_fd);
@@ -80,7 +81,8 @@ static int test_tls_pipe(uint16_t version, const char *name) {
     pthread_create(&tid, NULL, pipe_server_thread, &ta);
 
     assl_ssl client_ssl;
-    assl_ssl_init(&client_ssl, 1);
+        assl_ssl_init(&client_ssl, 1);
+    assl_ssl_set_verify(&client_ssl, 0, NULL);
     assl_ssl_set_version(&client_ssl, version);
     assl_ssl_set_cert(&client_ssl, dummy_cert, sizeof dummy_cert, &k);
 

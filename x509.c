@@ -249,6 +249,19 @@ static void parse_extensions(const asn1_node *exts, assl_x509_cert *cert) {
             uint32_t eoids[8];
             int enc = asn1_read_oid(&ext_oid, eoids, 8);
             if (enc > 0) {
+                int is_critical = 0;
+                const uint8_t *p = ext_entry.value;
+                const uint8_t *pend = ext_entry.value + ext_entry.len;
+                asn1_node tmp;
+                if (asn1_parse(p, (size_t)(pend - p), &tmp) == 0 && tmp.tag == ASN1_TAG_OID) {
+                    p = tmp.end;
+                    if (p < pend) {
+                        if (asn1_parse(p, (size_t)(pend - p), &tmp) == 0 && tmp.tag == ASN1_TAG_BOOLEAN) {
+                            is_critical = (tmp.len > 0 && tmp.value[0] != 0);
+                            p = tmp.end;
+                        }
+                    }
+                }
                 asn1_node ext_val;
                 if (asn1_find(&ext_entry, ASN1_TAG_OCTET_STRING, &ext_val) == 0) {
                     if (oid_eq(eoids, (size_t)enc, oid_auth_key_id, 4)) {
@@ -269,6 +282,8 @@ static void parse_extensions(const asn1_node *exts, assl_x509_cert *cert) {
                         parse_key_usage(&ext_val, cert);
                     } else if (oid_eq(eoids, (size_t)enc, oid_subject_alt_name, 4)) {
                         parse_subject_alt_name(&ext_val, cert);
+                    } else if (is_critical) {
+                        cert->has_unknown_critical = 1;
                     }
                 }
             }
@@ -399,6 +414,145 @@ void assl_x509_free(assl_x509_cert *cert) {
     }
 }
 
+static int assl_x509_time_to_ts(const assl_x509_time *t, int64_t *out);
+
+int assl_x509_crl_parse(assl_x509_crl *crl, const uint8_t *der, size_t len) {
+    if (!crl || !der || len < 16) return -1;
+    memset(crl, 0, sizeof *crl);
+    crl->der = der;
+    crl->der_len = len;
+
+    asn1_node outer, tbs, sigalg, sigval;
+    if (asn1_parse(der, len, &outer) < 0) return -1;
+    if (outer.tag != ASN1_TAG_SEQUENCE) return -1;
+    const uint8_t *p = outer.value;
+    if (asn1_parse(p, outer.len, &tbs) < 0 || tbs.tag != ASN1_TAG_SEQUENCE) return -1;
+    p = tbs.end;
+    if (asn1_parse(p, (size_t)(outer.end - p), &sigalg) < 0 ||
+        sigalg.tag != ASN1_TAG_SEQUENCE) return -1;
+    p = sigalg.end;
+    if (asn1_parse(p, (size_t)(outer.end - p), &sigval) < 0 ||
+        sigval.tag != ASN1_TAG_BIT_STRING) return -1;
+    if (outer.end != sigval.end) return -1;
+
+    crl->tbs = tbs.raw;
+    crl->tbs_len = (size_t)(tbs.end - tbs.raw);
+    if (sigval.len < 1) return -1;
+    unsigned unused_bits = sigval.value[0];
+    if (unused_bits > 7) return -1;
+    crl->signature = sigval.value + 1;
+    crl->sig_len = sigval.len - 1;
+
+    {
+        uint32_t oids[8];
+        asn1_node oidn;
+        if (asn1_find(&sigalg, ASN1_TAG_OID, &oidn) < 0) return -1;
+        int enc = asn1_read_oid(&oidn, oids, 8);
+        if (enc <= 0) return -1;
+        crl->sig_algo = match_sigalgo(oids, (size_t)enc);
+        if (crl->sig_algo == ASSL_X509_SIG_UNKNOWN) return -1;
+        crl->hash_algo = sigalgo_to_hash(crl->sig_algo);
+    }
+
+    asn1_node f;
+    if (asn1_parse(tbs.value, tbs.len, &f) < 0) return -1;
+
+    if (f.tag == ASN1_TAG_INTEGER) {
+        uint8_t vb[4];
+        int vl = asn1_read_int(&f, vb, sizeof vb);
+        if (vl < 0) return -1;
+        int ver = 0;
+        for (int i = 0; i < vl; i++) ver = (ver << 8) | vb[i];
+        if (ver > 1) return -1;
+        if (asn1_next(&f, (size_t)(tbs.end - f.end), &f) < 0) return -1;
+    }
+
+    if (f.tag != ASN1_TAG_SEQUENCE) return -1;
+    if (asn1_next(&f, (size_t)(tbs.end - f.end), &f) < 0) return -1;
+    if (f.tag != ASN1_TAG_SEQUENCE) return -1;
+    crl->issuer.raw = f.value;
+    crl->issuer.raw_len = f.len;
+
+    if (asn1_next(&f, (size_t)(tbs.end - f.end), &f) < 0) return -1;
+    {
+        assl_x509_time t;
+        if (parse_time(&f, &t) < 0) return -1;
+        if (assl_x509_time_to_ts(&t, &crl->this_update) < 0) return -1;
+    }
+
+    if (asn1_next(&f, (size_t)(tbs.end - f.end), &f) < 0) return -1;
+    if (f.tag == ASN1_TAG_UTCTIME || f.tag == ASN1_TAG_GENERALIZED) {
+        assl_x509_time t;
+        if (parse_time(&f, &t) < 0) return -1;
+        if (assl_x509_time_to_ts(&t, &crl->next_update) < 0) return -1;
+        crl->has_next_update = 1;
+        if (asn1_next(&f, (size_t)(tbs.end - f.end), &f) < 0) f.tag = 0;
+    }
+
+    if (f.tag == ASN1_TAG_SEQUENCE) {
+        const uint8_t *rp = f.value;
+        const uint8_t *rend = f.value + f.len;
+        while (rp < rend) {
+            asn1_node entry;
+            if (asn1_parse(rp, (size_t)(rend - rp), &entry) < 0) return -1;
+            if (entry.tag != ASN1_TAG_SEQUENCE) return -1;
+            asn1_node ser;
+            if (asn1_parse(entry.value, entry.len, &ser) < 0) return -1;
+            if (ser.tag != ASN1_TAG_INTEGER) return -1;
+            uint8_t sb[24];
+            int sl = asn1_read_int(&ser, sb, sizeof sb);
+            if (sl < 0 || sl > 20) return -1;
+            if (crl->revoked_count < ASSL_X509_MAX_REVOKED) {
+                assl_x509_revoked *e = &crl->revoked[crl->revoked_count++];
+                if (sl > 0) memcpy(e->serial, sb, (size_t)sl);
+                e->serial_len = (size_t)sl;
+            } else {
+                crl->revoked_truncated = 1;
+            }
+            rp = entry.end;
+        }
+        if (asn1_next(&f, (size_t)(tbs.end - f.end), &f) < 0) f.tag = 0;
+    }
+
+    if (f.tag == ASN1_TAG_CTX0) {
+        if (asn1_next(&f, (size_t)(tbs.end - f.end), &f) < 0) f.tag = 0;
+    }
+    return (f.tag == 0) ? 0 : -1;
+}
+
+int assl_x509_crl_check(const assl_x509_crl *crl,
+                        const assl_rsa_key *issuer_key,
+                        const assl_x509_dn *expected_issuer,
+                        int64_t now) {
+    if (!crl || !issuer_key || !expected_issuer) return -1;
+    if (crl->sig_algo == ASSL_X509_SIG_UNKNOWN || crl->tbs_len == 0) return -1;
+
+    if (assl_x509_dn_raw_eq(&crl->issuer, expected_issuer) == 0) return -1;
+
+    uint8_t digest[64];
+    assl_hash_one(crl->hash_algo, crl->tbs, crl->tbs_len, digest);
+    if (assl_rsa_verify(issuer_key, crl->hash_algo, digest,
+                        crl->signature, crl->sig_len) < 0)
+        return -1;
+
+    if (now < 0) now = (int64_t)time(NULL);
+    if (now < crl->this_update) return -1;
+    if (!crl->has_next_update) return -1;
+    if (now > crl->next_update) return -1;
+    return 0;
+}
+
+int assl_x509_crl_is_revoked(const assl_x509_crl *crl, const assl_x509_cert *cert) {
+    if (!crl || !cert) return -1;
+    if (crl->revoked_truncated) return -1;
+    for (size_t i = 0; i < crl->revoked_count; i++) {
+        if (crl->revoked[i].serial_len != cert->serial_len) continue;
+        if (memcmp(crl->revoked[i].serial, cert->serial, cert->serial_len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 int assl_x509_verify(const assl_x509_cert *cert, const assl_rsa_key *issuer_key) {
     if (!cert || !issuer_key || !cert->tbs || cert->tbs_len == 0) return -1;
     if (cert->sig_algo == ASSL_X509_SIG_UNKNOWN) return -1;
@@ -505,6 +659,20 @@ static int verify_cert_sig(const assl_x509_cert *child, const assl_x509_cert *pa
     return rv;
 }
 
+static int pubkey_from_cert(const assl_x509_cert *c, assl_rsa_key *k) {
+    if (!c || !k || c->pk_algo != ASSL_X509_PK_RSA) return -1;
+    assl_rsa_init(k);
+    assl_bn_init(&k->n);
+    assl_bn_init(&k->e);
+    if (assl_bn_copy(&k->n, &c->pubkey.n) || assl_bn_copy(&k->e, &c->pubkey.e)) {
+        assl_bn_free(&k->n);
+        assl_bn_free(&k->e);
+        return -1;
+    }
+    k->have_priv = 0;
+    return 0;
+}
+
 int assl_x509_verify_chain(const uint8_t *const *chain, const size_t *chain_len,
                            size_t chain_cnt, const assl_x509_trust_store *store,
                            const char *hostname, int64_t now) {
@@ -515,6 +683,11 @@ int assl_x509_verify_chain(const uint8_t *const *chain, const size_t *chain_len,
     assl_x509_cert certs[ASSL_X509_MAX_CHAIN];
     memset(certs, 0, sizeof certs);
     int ok = -1;
+
+    assl_rsa_key anchor_key;
+    assl_bn_init(&anchor_key.n);
+    assl_bn_init(&anchor_key.e);
+    int have_anchor_key = 0;
 
     for (size_t i = 0; i < chain_cnt; i++) {
         if (assl_x509_parse(&certs[i], chain[i], chain_len[i]) < 0) goto out;
@@ -530,12 +703,28 @@ int assl_x509_verify_chain(const uint8_t *const *chain, const size_t *chain_len,
         if (!assl_x509_dn_raw_eq(&child->issuer, &parent->subject)) goto out;
         if (verify_cert_sig(child, parent) < 0) goto out;
         if (parent->has_basic_constraints && !parent->is_ca) goto out;
-        if (store->strict && parent->key_usage >= 0 &&
-            !(parent->key_usage & ASSL_X509_KU_KEY_CERT_SIGN)) goto out;
+        if (store->strict) {
+            if (parent->key_usage >= 0 &&
+                !(parent->key_usage & ASSL_X509_KU_KEY_CERT_SIGN)) goto out;
+            if (parent->has_unknown_critical) goto out;
+        }
+    }
+
+    if (store->strict) {
+        int max_path_length = ASSL_X509_MAX_CHAIN;
+        for (size_t i = 0; i + 1 < chain_cnt; i++) {
+            const assl_x509_cert *ca = &certs[i];
+            if (!assl_x509_dn_raw_eq(&ca->issuer, &ca->subject))
+                max_path_length--;
+            if (ca->has_pathlen && ca->pathlen < max_path_length)
+                max_path_length = ca->pathlen;
+            if (max_path_length < 0) goto out;
+        }
     }
 
     const assl_x509_cert *top = &certs[chain_cnt - 1];
     int anchored = 0;
+    int anchor_in_chain = 0;
     for (size_t i = 0; i < store->count && !anchored; i++) {
         assl_x509_cert anc;
         if (assl_x509_parse(&anc, store->der[i], store->len[i]) < 0) continue;
@@ -547,20 +736,74 @@ int assl_x509_verify_chain(const uint8_t *const *chain, const size_t *chain_len,
             assl_x509_free(&anc);
             continue;
         }
-        if (store->strict && assl_x509_verify_self(&anc) != 0) {
-            assl_x509_free(&anc);
-            continue;
+        if (store->strict) {
+            if (assl_x509_verify_self(&anc) != 0) {
+                assl_x509_free(&anc);
+                continue;
+            }
+            if (anc.has_unknown_critical) {
+                assl_x509_free(&anc);
+                continue;
+            }
         }
-        if (assl_x509_time_in_validity(&anc, now)) anchored = 1;
+        if (assl_x509_time_in_validity(&anc, now)) {
+            anchored = 1;
+            if (assl_x509_dn_raw_eq(&certs[chain_cnt - 1].subject, &anc.subject) != 0)
+                anchor_in_chain = 1;
+            if (pubkey_from_cert(&anc, &anchor_key) == 0) have_anchor_key = 1;
+        }
         assl_x509_free(&anc);
     }
     if (!anchored) goto out;
+
+    if (store->check_revocation) {
+        size_t ncheck = chain_cnt - (anchor_in_chain ? 1u : 0u);
+        int revoked = 0, uncovered = 0, borked = 0;
+        for (size_t i = 0; i < ncheck && !borked; i++) {
+            assl_rsa_key issuer;
+            assl_bn_init(&issuer.n);
+            assl_bn_init(&issuer.e);
+            int got = 0;
+            if (i + 1 < chain_cnt) {
+                got = (pubkey_from_cert(&certs[i + 1], &issuer) == 0);
+            } else if (have_anchor_key) {
+                got = (assl_bn_copy(&issuer.n, &anchor_key.n) == 0 &&
+                       assl_bn_copy(&issuer.e, &anchor_key.e) == 0);
+            }
+            if (!got) {
+                assl_bn_free(&issuer.n);
+                assl_bn_free(&issuer.e);
+                borked = 1;
+                break;
+            }
+
+            int covered = 0;
+            for (size_t j = 0; j < store->crl_count && !covered; j++) {
+                assl_x509_crl crl;
+                if (assl_x509_crl_parse(&crl, store->crl_der[j], store->crl_len[j]) < 0)
+                    continue;
+                if (assl_x509_crl_check(&crl, &issuer, &certs[i].issuer, now) < 0)
+                    continue;
+                int r = assl_x509_crl_is_revoked(&crl, &certs[i]);
+                if (r < 0) continue;
+                if (r == 1) { revoked = 1; break; }
+                covered = 1;
+            }
+
+            assl_bn_free(&issuer.n);
+            assl_bn_free(&issuer.e);
+            if (!covered && !revoked) uncovered = 1;
+        }
+        if (revoked || uncovered || borked) goto out;
+    }
 
     if (hostname && assl_x509_check_hostname(leaf, hostname) < 0) goto out;
 
     ok = 0;
 out:
     for (size_t i = 0; i < chain_cnt; i++) assl_x509_free(&certs[i]);
+    assl_bn_free(&anchor_key.n);
+    assl_bn_free(&anchor_key.e);
     return ok;
 }
 
@@ -693,9 +936,6 @@ static int der_write_null(der_buf *b) {
 
 static int der_build_dn(der_buf *b, const assl_x509_dn_pair *attrs, size_t count) {
     for (size_t i = 0; i < count; i++) {
-        der_buf rdn_val;
-        if (der_init(&rdn_val, 128)) return -1;
-
         const uint32_t *oid = NULL;
         size_t oid_count = 0;
         switch (attrs[i].attr) {
@@ -703,16 +943,16 @@ static int der_build_dn(der_buf *b, const assl_x509_dn_pair *attrs, size_t count
             case ASSL_X509_DN_O:      oid = oid_o;  oid_count = 4; break;
             case ASSL_X509_DN_OU:     oid = oid_ou; oid_count = 4; break;
             case ASSL_X509_DN_EMAIL:  oid = oid_email; oid_count = 7; break;
-            default: free(rdn_val.buf); return -1;
+            default: return -1;
         }
 
         der_buf seq_buf;
-        if (der_init(&seq_buf, 64)) { free(rdn_val.buf); return -1; }
+        if (der_init(&seq_buf, 64)) return -1;
         der_write_oid(&seq_buf, oid, oid_count);
         der_write_utf8string(&seq_buf, attrs[i].value, attrs[i].value_len);
 
         der_buf set_buf;
-        if (der_init(&set_buf, 128)) { free(seq_buf.buf); free(rdn_val.buf); return -1; }
+        if (der_init(&set_buf, 128)) { free(seq_buf.buf); return -1; }
         der_write_tag_len(&set_buf, ASN1_TAG_SET, 0);
         size_t set_content_start = set_buf.len;
         der_write_tag_len(&set_buf, ASN1_TAG_SEQUENCE, seq_buf.len);
@@ -759,7 +999,7 @@ static int der_build_spki(der_buf *b, const assl_rsa_key *key) {
     free(key_seq.buf);
 
     der_buf algo_seq;
-    if (der_init(&algo_seq, algo_buf.len + 8)) { free(key_seq.buf); free(algo_buf.buf); return -1; }
+    if (der_init(&algo_seq, algo_buf.len + 8)) { free(algo_buf.buf); return -1; }
     der_write_tag_len(&algo_seq, ASN1_TAG_SEQUENCE, algo_buf.len);
     der_write(&algo_seq, algo_buf.buf, algo_buf.len);
     free(algo_buf.buf);
@@ -838,7 +1078,7 @@ static int der_build_tbs(der_buf *b, const assl_x509_params *params,
     free(issuer_buf.buf);
 
     der_buf validity_buf;
-    if (der_init(&validity_buf, 40)) { free(issuer_buf.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
+    if (der_init(&validity_buf, 40)) { free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
     der_build_validity(&validity_buf, &params->validity);
 
     der_buf subject_buf;

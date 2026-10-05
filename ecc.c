@@ -329,6 +329,7 @@ int assl_p256_keygen(uint8_t d[32], uint8_t q[64]) {
     assl_bn rnd, n;
     assl_bn_init(&rnd); assl_bn_init(&n);
     if (p256_init()) return -1;
+    if (!assl_rng_is_secure()) { assl_bn_free(&rnd); assl_bn_free(&n); return -1; }
     for (;;) {
         if (assl_bn_rand(&rnd, 256)) { assl_bn_free(&rnd); assl_bn_free(&n); return -1; }
         if (assl_bn_cmp(&rnd, &N) < 0 && !assl_bn_is_zero(&rnd)) break;

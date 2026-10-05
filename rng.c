@@ -81,35 +81,27 @@ static void rng_ensure(void) {
     } else if (!rng_ready) {
         rng_init_from_os();
     }
-    if (!rng_ready) {
-        static uint64_t lcg = 0x0ddc0ffee9c0c00fULL;
-        lcg = lcg * 0x5851f42d4c957f2dULL + 0x14057b7ef767814fULL;
-        for (size_t i = 0; i < ASSL_RNG_KEY_LEN; i++) {
-            rng_key[i] = (uint8_t)((lcg >> (8 * (i & 7))));
-            if (i == 15) lcg = lcg * 0x9e3779b97f4a7c15ULL + 1;
-        }
-        for (size_t i = 0; i < ASSL_RNG_NONCE_LEN; i++)
-            rng_nonce[i] = (uint8_t)((lcg >> (8 * (i & 7))));
-        rng_counter = (uint32_t)lcg;
-        rng_ready = 1;
-        rng_secure = 0;
-        rng_generated = 0;
-    }
-    if (!rng_secure && rng_counter >= ASSL_RNG_RESEED_BYTES / ASSL_RNG_BLOCK_LEN)
+    if (!rng_secure && rng_ready && rng_counter >= ASSL_RNG_RESEED_BYTES / ASSL_RNG_BLOCK_LEN)
         rng_init_from_os();
 }
 
-int assl_rng_is_secure(void) {
+static int rng_usable(void) {
     rng_ensure();
     return rng_secure;
 }
 
-void assl_rng_bytes(uint8_t *out, size_t len) {
-    if (!out) return;
-    rng_ensure();
+int assl_rng_is_secure(void) {
+    return rng_usable();
+}
+
+int assl_rng_bytes_checked(uint8_t *out, size_t len) {
+    if (!out) return -1;
+    if (!rng_usable()) { memset(out, 0, len); return -1; }
     while (len) {
-        if (!rng_secure && rng_counter >= ASSL_RNG_RESEED_BYTES / ASSL_RNG_BLOCK_LEN)
+        if (!rng_secure && rng_counter >= ASSL_RNG_RESEED_BYTES / ASSL_RNG_BLOCK_LEN) {
             rng_init_from_os();
+            if (!rng_secure) { memset(out, 0, len); return -1; }
+        }
         uint8_t blk[ASSL_RNG_BLOCK_LEN];
         assl_chacha20_block(rng_key, rng_nonce, rng_counter++, blk);
         size_t t = len < ASSL_RNG_BLOCK_LEN ? len : ASSL_RNG_BLOCK_LEN;
@@ -118,6 +110,11 @@ void assl_rng_bytes(uint8_t *out, size_t len) {
         len -= t;
         rng_generated += (uint32_t)t;
     }
+    return 0;
+}
+
+void assl_rng_bytes(uint8_t *out, size_t len) {
+    (void)assl_rng_bytes_checked(out, len);
 }
 
 uint64_t assl_rng_next(void) {
@@ -126,15 +123,18 @@ uint64_t assl_rng_next(void) {
     return v;
 }
 
-void assl_rng_bytes_nonzero(uint8_t *out, size_t len) {
+int assl_rng_bytes_nonzero(uint8_t *out, size_t len) {
+    if (!out) return -1;
+    if (!rng_usable()) { memset(out, 0, len); return -1; }
     uint8_t b;
     while (len) {
         do {
-            assl_rng_bytes(&b, 1);
+            if (assl_rng_bytes_checked(&b, 1)) { memset(out, 0, len); return -1; }
         } while (b == 0);
         *out++ = b;
         len--;
     }
+    return 0;
 }
 
 void assl_rng_seed(uint64_t seed) {

@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <signal.h>
 #include "utest.h"
+#include "test_cert.h"
 #include "asslibc.h"
 #include "../ssl.h"
 
@@ -24,7 +25,8 @@ static const char *k_dq =
 static const char *k_qi =
     "31dd749563f9b36e4228cbdf64a9eca0c6aec38f1246b5e4b9b2ca4d2a3bf8fd9364dbe177c4d1683b307a415936027bd79b6e7c5c55eaa0b774986e7e38ded7c91a36734a191cbe208aeb19c562fb14cf3007e842ee67aa2f484fc38e3e776e5bae9023c5defaa3b319677ae26993b872d7e0dc5bb67b5ff19d8d6823aea1b2";
 
-static const uint8_t dummy_cert[] = { 0x30, 0x03, 0x02, 0x01, 0x01 };
+#define dummy_cert test_cert_der
+#define dummy_cert_len sizeof test_cert_der
 
 static void setup_key(assl_rsa_key *k) {
     assl_rsa_init(k);
@@ -54,7 +56,7 @@ static void *server_thread(void *arg) {
         assl_ssl_init(&ssl, 0);
     assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, ta->version);
-    assl_ssl_set_cert(&ssl, dummy_cert, sizeof dummy_cert, ta->key);
+    assl_ssl_set_cert(&ssl, dummy_cert, dummy_cert_len, ta->key);
     ta->result = assl_ssl_handshake(&ssl, ta->fd, ta->fd);
     if (ta->result == 0) {
         char buf[64];
@@ -81,7 +83,7 @@ static int test_version(uint16_t version, const char *name) {
         assl_ssl_init(&client_ssl, 1);
     assl_ssl_set_verify(&client_ssl, 0, NULL);
     assl_ssl_set_version(&client_ssl, version);
-    assl_ssl_set_cert(&client_ssl, dummy_cert, sizeof dummy_cert, &k);
+    assl_ssl_set_cert(&client_ssl, dummy_cert, dummy_cert_len, &k);
 
     int cr = assl_ssl_handshake(&client_ssl, sv[0], sv[0]);
     utest_bool(cr == 0, "client_handshake");
@@ -96,6 +98,144 @@ static int test_version(uint16_t version, const char *name) {
 
     pthread_join(tid, NULL);
     utest_bool(ta.result == 0, "server_handshake");
+
+    close(sv[0]);
+    assl_rsa_free(&k);
+    return utest_end();
+}
+
+static volatile sig_atomic_t g_alarm_fired;
+static void on_alarm(int sig) {
+    (void)sig;
+    g_alarm_fired = 1;
+}
+
+static void *rogue_server_thread(void *arg) {
+    thread_arg *ta = arg;
+    assl_ssl ssl;
+        assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
+    assl_ssl_set_version(&ssl, ta->version);
+    assl_rsa_key rogue = *ta->key;
+    const char *junk =
+        "112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    assl_bn_init(&rogue.d);
+    assl_bn_init(&rogue.dp);
+    assl_bn_init(&rogue.dq);
+    assl_bn_init(&rogue.qinv);
+    assl_bn_from_hex(&rogue.d, junk);
+    assl_bn_from_hex(&rogue.dp, junk);
+    assl_bn_from_hex(&rogue.dq, junk);
+    assl_bn_from_hex(&rogue.qinv, junk);
+    rogue.have_crt = 0;
+    assl_ssl_set_cert(&ssl, dummy_cert, dummy_cert_len, &rogue);
+    ta->result = assl_ssl_handshake(&ssl, ta->fd, ta->fd);
+    if (ta->result == 0) {
+        char buf[64];
+        assl_ssl_read(&ssl, ta->fd, buf, sizeof buf);
+    }
+    close(ta->fd);
+    return NULL;
+}
+
+static int test_tls13_certverify_rejects_wrong_key(void) {
+    utest_begin("tls13-certverify-wrong-key");
+    int sv[2];
+    utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+
+    assl_rsa_key k;
+    setup_key(&k);
+
+    thread_arg ta = { .fd = sv[1], .key = &k, .version = TLS13_VERSION, .result = -1 };
+    pthread_t tid;
+    pthread_create(&tid, NULL, rogue_server_thread, &ta);
+
+    assl_ssl client_ssl;
+        assl_ssl_init(&client_ssl, 1);
+    assl_ssl_set_verify(&client_ssl, 0, NULL);
+    assl_ssl_set_version(&client_ssl, TLS13_VERSION);
+
+    signal(SIGALRM, on_alarm);
+    alarm(5);
+    int cr = assl_ssl_handshake(&client_ssl, sv[0], sv[0]);
+    alarm(0);
+    utest_bool(cr < 0 || g_alarm_fired, "client_rejects_bad_certificateverify");
+    utest_bool(client_ssl.state != SSL3_STATE_CONNECTED, "client_not_connected");
+
+    shutdown(sv[0], SHUT_RDWR);
+    close(sv[0]);
+    pthread_join(tid, NULL);
+    close(sv[1]);
+    assl_rsa_free(&k);
+    return utest_end();
+}
+
+typedef struct {
+    int fd;
+    assl_rsa_key *key;
+    int version;
+    int result;
+    int update_done;
+} ku_arg;
+
+static void *ku_server_thread(void *arg) {
+    ku_arg *ta = arg;
+    assl_ssl ssl;
+        assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
+    assl_ssl_set_version(&ssl, ta->version);
+    assl_ssl_set_cert(&ssl, dummy_cert, dummy_cert_len, ta->key);
+    ta->result = assl_ssl_handshake(&ssl, ta->fd, ta->fd);
+    if (ta->result == 0) {
+        char buf[64];
+        int n = assl_ssl_read(&ssl, ta->fd, buf, sizeof buf);
+        if (n > 0) {
+            if (assl_ssl_key_update(&ssl, ta->fd, 0) == 0) ta->update_done = 1;
+            assl_ssl_write(&ssl, ta->fd, "after-update", 12);
+        }
+    }
+    close(ta->fd);
+    return NULL;
+}
+
+static int test_tls13_key_update(void) {
+    utest_begin("tls13-key-update");
+    int sv[2];
+    utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+
+    assl_rsa_key k;
+    setup_key(&k);
+
+    ku_arg ta = { .fd = sv[1], .key = &k, .version = TLS13_VERSION,
+                  .result = -1, .update_done = 0 };
+    pthread_t tid;
+    pthread_create(&tid, NULL, ku_server_thread, &ta);
+
+    assl_ssl client;
+        assl_ssl_init(&client, 1);
+    assl_ssl_set_verify(&client, 0, NULL);
+    assl_ssl_set_version(&client, TLS13_VERSION);
+
+    int cr = assl_ssl_handshake(&client, sv[0], sv[0]);
+    utest_bool(cr == 0, "handshake");
+
+    int ku = assl_ssl_key_update(&client, sv[0], 0);
+    utest_bool(ku == 0, "key_update_sent");
+    utest_bool(client.write_seq_num == 0, "write_seq_reset");
+
+    const char *msg = "post-rotation";
+    utest_bool(assl_ssl_write(&client, sv[0], msg, strlen(msg)) >= 0, "write_after_update");
+
+    char buf[64];
+    int n = assl_ssl_read(&client, sv[0], buf, sizeof buf - 1);
+    if (n > 0) buf[n] = 0;
+    utest_bool(n == 12 && memcmp(buf, "after-update", 12) == 0,
+               "server_data_across_both_updates");
+
+    pthread_join(tid, NULL);
+    utest_bool(ta.result == 0, "server_handshake");
+    utest_bool(ta.update_done == 1, "server_sent_its_key_update");
 
     close(sv[0]);
     assl_rsa_free(&k);
@@ -143,6 +283,8 @@ int main(void) {
     fails += test_tls13_hkdf_label();
     fails += test_tls13_version();
     fails += test_tls13_init();
+    fails += test_tls13_certverify_rejects_wrong_key();
+    fails += test_tls13_key_update();
     fails += test_version(TLS13_VERSION, "tls13-handshake");
     if (fails == 0) printf("ALL TLS 1.3 TESTS PASSED\n");
     return fails;

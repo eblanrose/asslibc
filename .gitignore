@@ -1,1 +1,7 @@
+*
+!*.c
+!*.h
+!*.md
+!*.txt
+!Makefile
 *.o

@@ -6,6 +6,7 @@
 #include <signal.h>
 #include "../ssl.h"
 #include "utest.h"
+#include "test_cert.h"
 
 static const char *k_n =
     "85aef7ed90484430ff6f7a64f0355efb959c54a3df918351311436a8b760f1fdf12d4fb9b9182a162655e279e5f1c20d1a1c5c4b82bce8bb340e53a8beb402a49e4a96efc15c4166dbb006a5d39d89a51642afc698fe08e1cd1d68d1d94f419b72b45f4a894c67cf3916f59e3b45949ce0add200c37f1b7cf8b97bb03f27d69ac175ffe71cdf9fcd7a4401dc7b481966d9d5636e3e380345d9fa685c9c45d0bd29a79269a2ac62fbf4367eefc1b4bd3dd07fa7d1ba3cdd751a4c72cb454c3335b835c7d24d578013a0b026a3c423ff6ad5f4fa2366c174d76877705322845a09de0a6f2662284bf14eb7b1d98b6e3cb78cc517af6b51114f2863d8c2a3f0b371";
@@ -23,7 +24,8 @@ static const char *k_dq =
 static const char *k_qi =
     "31dd749563f9b36e4228cbdf64a9eca0c6aec38f1246b5e4b9b2ca4d2a3bf8fd9364dbe177c4d1683b307a415936027bd79b6e7c5c55eaa0b774986e7e38ded7c91a36734a191cbe208aeb19c562fb14cf3007e842ee67aa2f484fc38e3e776e5bae9023c5defaa3b319677ae26993b872d7e0dc5bb67b5ff19d8d6823aea1b2";
 
-static const uint8_t dummy_cert[] = { 0x30, 0x03, 0x02, 0x01, 0x01 };
+#define dummy_cert test_cert_der
+#define dummy_cert_len sizeof test_cert_der
 
 static void setup_key(assl_rsa_key *k) {
     assl_rsa_init(k);
@@ -51,7 +53,7 @@ static void *server_thread(void *arg) {
     assl_ssl ssl;
         assl_ssl_init(&ssl, 0);
     assl_ssl_set_verify(&ssl, 0, NULL);
-    assl_ssl_set_cert(&ssl, dummy_cert, sizeof dummy_cert, ta->key);
+    assl_ssl_set_cert(&ssl, dummy_cert, dummy_cert_len, ta->key);
     ta->result = assl_ssl_handshake(&ssl, ta->fd, ta->fd);
     if (ta->result == 0) {
         char buf[64];
@@ -90,7 +92,7 @@ static int test_ssl_handshake(void) {
     assl_ssl client_ssl;
         assl_ssl_init(&client_ssl, 1);
     assl_ssl_set_verify(&client_ssl, 0, NULL);
-    assl_ssl_set_cert(&client_ssl, dummy_cert, sizeof dummy_cert, &k);
+    assl_ssl_set_cert(&client_ssl, dummy_cert, dummy_cert_len, &k);
 
     int cr = assl_ssl_handshake(&client_ssl, sv[0], sv[0]);
     utest_bool(cr == 0, "client_handshake");

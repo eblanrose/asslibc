@@ -24,11 +24,17 @@ FUZZ_CC   ?= clang
 FUZZ_CFLAGS ?= -std=c11 -O1 -g -Wall -Wextra -I.
 ASAN_LIBS   = sha aes bn rsa rsa_keygen dh ecc asn1 x509 rng ssl
 
-.PHONY: all clean test lib interop fuzz asan-test
+.PHONY: all clean test lib interop interop-test fuzz asan-test
 
 all: $(TEST_BINS) $(INTEROP_BINS) $(LIB)
 
 interop: $(INTEROP_BINS) $(LIB)
+
+interop-test: $(INTEROP_BINS) $(TEST_DIR)/gen_cert $(LIB)
+	@$(TEST_DIR)/interop.sh
+
+$(TEST_DIR)/gen_cert: $(TEST_DIR)/gen_cert.c $(LIB) $(HDRS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
 fuzz: $(FUZZ_BINS)
 	@echo "Fuzzers built. Run them, e.g.:"
@@ -77,7 +83,7 @@ rsa_keygen.o: rsa_keygen.c rsa_keygen.h asslibc.h
 
 HDRS = asslibc.h ssl.h x509.h asn1.h
 
-$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB) $(HDRS)
+$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB) $(HDRS) $(TEST_DIR)/test_cert.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
 lib: $(LIB)
@@ -87,4 +93,4 @@ test: $(TEST_BINS)
 	@echo "ALL TEST SUITES PASSED"
 
 clean:
-	rm -f $(TEST_BINS) $(INTEROP_BINS) $(OBJ_FILES) $(LIB) $(FUZZ_BINS) test/asan-*
+	rm -f $(TEST_BINS) $(INTEROP_BINS) $(TEST_DIR)/gen_cert $(OBJ_FILES) $(LIB) $(FUZZ_BINS) test/asan-*

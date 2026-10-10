@@ -43,6 +43,7 @@
 
 #define SSL3_ALERT_CLOSE_NOTIFY     0
 #define SSL3_ALERT_UNEXPECTED_MSG  10
+#define SSL3_ALERT_DECRYPT_ERROR  51
 #define SSL3_ALERT_BAD_RECORD_MAC  20
 #define SSL3_ALERT_DECOMPRESSION_FAIL 30
 #define SSL3_ALERT_HANDSHAKE_FAILURE 40
@@ -52,6 +53,8 @@
 #define SSL3_ALERT_MISSING_EXTENSION 109
 #define SSL3_ALERT_UNSUPPORTED_EXTENSION 110
 #define SSL3_ALERT_UNRECOGNIZED_NAME  112
+#define SSL3_ALERT_ILLEGAL_PARAMETER  47
+#define SSL3_ALERT_PROTOCOL_VERSION   70
 #define SSL3_ALERT_UNKNOWN_CA       48
 #define SSL3_ALERT_ACCESS_DENIED    49
 
@@ -81,6 +84,29 @@
 #define SSL3_RANDOM_LEN        32
 
 #define SSL3_RECORD_EOF        (-2)
+
+#define SSL3_EXT_SERVER_NAME           0
+#define SSL3_EXT_STATUS_REQUEST        5
+#define SSL3_EXT_SUPPORTED_GROUPS      10
+#define SSL3_EXT_EC_POINT_FORMATS      11
+#define SSL3_EXT_SIGNATURE_ALGORITHMS  13
+#define SSL3_EXT_ALPN                  16
+#define SSL3_EXT_EXTENDED_MASTER_SECRET 23
+#define SSL3_EXT_SESSION_TICKET        35
+#define SSL3_EXT_PRE_SHARED_KEY        41
+#define SSL3_EXT_EARLY_DATA            42
+#define SSL3_EXT_SUPPORTED_VERSIONS    43
+#define SSL3_EXT_COOKIE                44
+#define SSL3_EXT_PSK_KEY_EXCHANGE_MODES 45
+#define SSL3_EXT_KEY_SHARE             51
+
+#define SSL3_GROUP_SECP256R1 0x0017
+#define SSL3_GROUP_SECP384R1 0x0018
+#define SSL3_GROUP_SECP521R1 0x0019
+#define SSL3_GROUP_X25519    0x001D
+
+#define SSL3_ALERT_INAPPROPRIATE_FALLBACK 86
+#define SSL3_ALERT_INSUFFICIENT_SECURITY 71
 
 #define TLS13_MAX_RECORD_LEN   16384
 #define TLS13_HANDSHAKE_PREFIX  16  /* content_type(1) + legacy_record_version(2) + length(2) = 5
@@ -192,6 +218,24 @@ typedef struct {
     int verify_hostname_len;
     assl_x509_trust_store trust_store;
 
+    char sni_hostname[256];
+    int sni_hostname_len;
+    char server_name[256];
+    size_t server_name_len;
+
+    uint8_t alpn_protos[64];
+    size_t alpn_protos_len;
+    uint8_t peer_alpn_protos[64];
+    size_t peer_alpn_protos_len;
+    uint8_t negotiated_alpn[64];
+    size_t negotiated_alpn_len;
+
+    int ems_offered;
+    int ems_negotiated;
+
+    int hrr_done;
+    uint16_t selected_group;
+
     uint8_t wbuf[SSL3_MAX_RECORD_LEN + SSL3_HEADER_LEN + 256];
     size_t wbuf_len;
 
@@ -212,10 +256,22 @@ int assl_ssl_set_verify(assl_ssl *ssl, int enable, const char *hostname);
 
 int assl_ssl_add_trust(assl_ssl *ssl, const uint8_t *der, size_t len);
 
+int assl_ssl_set_servername(assl_ssl *ssl, const char *hostname);
+
+int assl_ssl_set_alpn(assl_ssl *ssl, const uint8_t *protos, size_t len);
+
+const char *assl_ssl_get_negotiated_alpn(const assl_ssl *ssl);
+
+const char *assl_ssl_get_server_name(const assl_ssl *ssl);
+
+uint16_t assl_ssl_get_group(const assl_ssl *ssl);
+
 
 int assl_ssl_handshake(assl_ssl *ssl, int in_fd, int out_fd);
 
 int assl_ssl_read(assl_ssl *ssl, int fd, void *buf, size_t len);
+
+int assl_ssl_key_update(assl_ssl *ssl, int fd, int request);
 
 int assl_ssl_write(assl_ssl *ssl, int fd, const void *buf, size_t len);
 

@@ -8,9 +8,14 @@
 #include "asslibc.h"
 #include "../ssl.h"
 
+static const uint8_t k_alpn[] = {
+    0x08, 'h','t','t','p','/','1','.','1',
+    0x0c, 'a','s','s','l','i','b','c','-','t','e','s','t'
+};
+
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "usage: %s <host> <port> <tls1.3|tls1.2>\n", argv[0]);
+        fprintf(stderr, "usage: %s <host> <port> <tls1.3|tls1.2> [servername]\n", argv[0]);
         return 2;
     }
     const char *host = argv[1];
@@ -31,6 +36,12 @@ int main(int argc, char **argv) {
         assl_ssl_init(&ssl, 1);
     assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, want_version);
+    if (argc > 4 && argv[4][0])
+        assl_ssl_set_servername(&ssl, argv[4]);
+    if (assl_ssl_set_alpn(&ssl, k_alpn, sizeof k_alpn) != 0) {
+        fprintf(stderr, "interop_client: bad ALPN list\n");
+        return 1;
+    }
 
     fprintf(stderr, "interop_client: handshaking as client...\n");
     int rc = assl_ssl_handshake(&ssl, fd, fd);
@@ -38,8 +49,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "interop_client: HANDSHAKE FAILED\n");
         return 1;
     }
-    fprintf(stderr, "interop_client: handshake OK version=0x%04x cipher=0x%04x\n",
-            assl_ssl_get_version(&ssl), assl_ssl_get_cipher(&ssl));
+    fprintf(stderr, "interop_client: handshake OK version=0x%04x cipher=0x%04x alpn=%s\n",
+            assl_ssl_get_version(&ssl), assl_ssl_get_cipher(&ssl),
+            assl_ssl_get_negotiated_alpn(&ssl) ? assl_ssl_get_negotiated_alpn(&ssl) : "(none)");
 
     const char *req = "echo:hello from asslibc\n";
     rc = assl_ssl_write(&ssl, fd, req, strlen(req));

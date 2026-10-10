@@ -24,6 +24,11 @@ static const char *k_dq =
 static const char *k_qi =
     "31dd749563f9b36e4228cbdf64a9eca0c6aec38f1246b5e4b9b2ca4d2a3bf8fd9364dbe177c4d1683b307a415936027bd79b6e7c5c55eaa0b774986e7e38ded7c91a36734a191cbe208aeb19c562fb14cf3007e842ee67aa2f484fc38e3e776e5bae9023c5defaa3b319677ae26993b872d7e0dc5bb67b5ff19d8d6823aea1b2";
 
+static const uint8_t k_alpn[] = {
+    0x08, 'h','t','t','p','/','1','.','1',
+    0x0c, 'a','s','s','l','i','b','c','-','t','e','s','t'
+};
+
 static void setup_key(assl_rsa_key *k) {
     assl_rsa_init(k);
     assl_bn n, e, d, p, q, dp, dq, qi;
@@ -89,6 +94,10 @@ int main(int argc, char **argv) {
     assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, want_version);
     assl_ssl_set_cert(&ssl, cert, cert_len, &key);
+    if (assl_ssl_set_alpn(&ssl, k_alpn, sizeof k_alpn) != 0) {
+        fprintf(stderr, "interop_server: bad ALPN list\n");
+        return 1;
+    }
 
     fprintf(stderr, "interop_server: handshaking as server...\n");
     int rc = assl_ssl_handshake(&ssl, fd, fd);
@@ -96,8 +105,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "interop_server: HANDSHAKE FAILED\n");
         return 1;
     }
-    fprintf(stderr, "interop_server: handshake OK version=0x%04x cipher=0x%04x\n",
-            assl_ssl_get_version(&ssl), assl_ssl_get_cipher(&ssl));
+    fprintf(stderr, "interop_server: handshake OK version=0x%04x cipher=0x%04x alpn=%s sni=%s\n",
+            assl_ssl_get_version(&ssl), assl_ssl_get_cipher(&ssl),
+            assl_ssl_get_negotiated_alpn(&ssl) ? assl_ssl_get_negotiated_alpn(&ssl) : "(none)",
+            assl_ssl_get_server_name(&ssl) ? assl_ssl_get_server_name(&ssl) : "(none)");
 
     char buf[4096];
     for (;;) {

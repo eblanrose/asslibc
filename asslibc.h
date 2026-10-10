@@ -276,7 +276,8 @@ int assl_rsa_set_key(assl_rsa_key *k,
 int assl_rsa_public(const assl_rsa_key *k, const uint8_t *in, size_t inlen, uint8_t *out);
 int assl_rsa_private(const assl_rsa_key *k, const uint8_t *in, size_t inlen, uint8_t *out);
 int assl_rsa_encrypt(const assl_rsa_key *k, const uint8_t *in, size_t inlen, uint8_t *out);
-int assl_rsa_decrypt(const assl_rsa_key *k, const uint8_t *in, size_t inlen, uint8_t *out, size_t *outlen);
+int assl_rsa_decrypt(const assl_rsa_key *k, const uint8_t *in, size_t inlen,
+                     uint8_t *out, size_t outcap, size_t *outlen);
 int assl_rsa_sign(const assl_rsa_key *k, assl_hash_t h, const uint8_t *digest, uint8_t *sig);
 int assl_rsa_verify(const assl_rsa_key *k, assl_hash_t h, const uint8_t *digest, const uint8_t *sig, size_t siglen);
 int assl_rsa_sign_pss(const assl_rsa_key *k, assl_hash_t h, const uint8_t *digest, size_t saltlen, uint8_t *sig);

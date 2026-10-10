@@ -38,9 +38,24 @@ int assl_dh_group(int group, assl_bn *p, assl_bn *g) {
     return h ? dh_set(h, p, g) : -1;
 }
 
+static int dh_pub_in_range(const assl_bn *p, const assl_bn *pub) {
+    if (!p || !pub) return 0;
+    if (assl_bn_is_zero(pub) || assl_bn_is_one(pub)) return 0;
+    assl_bn one, pm1;
+    assl_bn_init(&one);
+    assl_bn_init(&pm1);
+    int ok = 0;
+    if (assl_bn_set_u32(&one, 1) == 0 && assl_bn_sub(p, &one, &pm1) == 0)
+        ok = assl_bn_cmp(pub, &pm1) < 0;
+    assl_bn_free(&one);
+    assl_bn_free(&pm1);
+    return ok;
+}
+
 int assl_dh_pub(const assl_bn *p, const assl_bn *g, const assl_bn *priv, assl_bn *pub) {
     if (!p || !g || !priv || !pub) return -1;
-    return assl_bn_modpow_ct(g, priv, p, pub);
+    if (assl_bn_modpow_ct(g, priv, p, pub)) return -1;
+    return dh_pub_in_range(p, pub) ? 0 : -1;
 }
 
 int assl_dh_keygen(const assl_bn *p, const assl_bn *g, assl_bn *priv, assl_bn *pub) {
@@ -61,5 +76,7 @@ int assl_dh_keygen(const assl_bn *p, const assl_bn *g, assl_bn *priv, assl_bn *p
 
 int assl_dh_shared(const assl_bn *p, const assl_bn *priv, const assl_bn *peer_pub, assl_bn *shared) {
     if (!p || !priv || !peer_pub || !shared) return -1;
-    return assl_bn_modpow_ct(peer_pub, priv, p, shared);
+    if (!dh_pub_in_range(p, peer_pub)) return -1;
+    if (assl_bn_modpow_ct(peer_pub, priv, p, shared)) return -1;
+    return dh_pub_in_range(p, shared) ? 0 : -1;
 }

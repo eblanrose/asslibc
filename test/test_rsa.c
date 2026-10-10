@@ -89,14 +89,14 @@ static int test_bn_rsa_pkcs1_enc(void) {
       assl_rsa_private(&k, ct, 256, pt);
       utest_bool(memcmp(pt, em, 256) == 0, "decrypt_known_answer");
       size_t mlen = 0;
-      utest_bool(assl_rsa_decrypt(&k, ct, 256, msg, &mlen) == 0, "decrypt_pkcs1_ok");
+      utest_bool(assl_rsa_decrypt(&k, ct, 256, msg, sizeof msg, &mlen) == 0, "decrypt_pkcs1_ok");
       utest_bool(mlen == 21 && memcmp(msg, "Hello RSA PKCS#1 v1.5", 21) == 0, "decrypt_message"); }
     { uint8_t ct[256], dec[256];
       const char *m = "roundtrip over the line";
       size_t mlen = strlen(m);
       size_t declen = 0;
       utest_bool(assl_rsa_encrypt(&k, (const uint8_t *)m, mlen, ct) == 0, "enc_ok");
-      utest_bool(assl_rsa_decrypt(&k, ct, 256, dec, &declen) == 0, "dec_ok");
+      utest_bool(assl_rsa_decrypt(&k, ct, 256, dec, sizeof dec, &declen) == 0, "dec_ok");
       utest_bool(declen == mlen && memcmp(dec, m, mlen) == 0, "roundtrip"); }
     { uint8_t ct[256];
       const char *m = "x";
@@ -104,15 +104,49 @@ static int test_bn_rsa_pkcs1_enc(void) {
       assl_rsa_encrypt(&k, (const uint8_t *)m, mlen, ct);
       ct[0] ^= 1;
       uint8_t dec[256]; size_t declen = 0;
-      utest_bool(assl_rsa_decrypt(&k, ct, 256, dec, &declen) != 0, "reject_bad_ct");
+      utest_bool(assl_rsa_decrypt(&k, ct, 256, dec, sizeof dec, &declen) != 0, "reject_bad_ct");
       ct[0] ^= 1;
       ct[1] = 0x01;
-      utest_bool(assl_rsa_decrypt(&k, ct, 256, dec, &declen) != 0, "reject_bad_type"); }
+      utest_bool(assl_rsa_decrypt(&k, ct, 256, dec, sizeof dec, &declen) != 0, "reject_bad_type"); }
     { uint8_t ct[256];
       const char *m = "z";
       assl_rsa_encrypt(&k, (const uint8_t *)m, 1, ct);
       uint8_t dec[256]; size_t declen = 0;
-      utest_bool(assl_rsa_decrypt(&k, ct, 256, dec, &declen) == 0, "ok_again"); }
+      utest_bool(assl_rsa_decrypt(&k, ct, 256, dec, sizeof dec, &declen) == 0, "ok_again"); }
+    { uint8_t good[256];
+      assl_rsa_encrypt(&k, (const uint8_t *)"0123456789abcdef0123456789abcdef"
+                                  "0123456789abcdef", 40, good);
+      uint8_t dec[256]; size_t dl = 0;
+      int base_ok = assl_rsa_decrypt(&k, good, 256, dec, sizeof dec, &dl);
+      utest_bool(base_ok == 0 && dl == 40, "baseline_conforming");
+
+      uint8_t bad[256]; memcpy(bad, good, 256); bad[0] ^= 0xFF;
+      dl = 0;
+      utest_bool(assl_rsa_decrypt(&k, bad, 256, dec, sizeof dec, &dl) != 0,
+                 "reject_wrong_block_type");
+      memcpy(bad, good, 256); bad[0] = 0; bad[1] = 2; memset(bad + 2, 0xAA, 254);
+      dl = 0;
+      utest_bool(assl_rsa_decrypt(&k, bad, 256, dec, sizeof dec, &dl) != 0,
+                 "reject_no_separator");
+      memcpy(bad, good, 256); memset(bad + 2, 0x00, 4);
+      dl = 0;
+      utest_bool(assl_rsa_decrypt(&k, bad, 256, dec, sizeof dec, &dl) != 0,
+                 "reject_short_padding");
+      uint8_t other[256];
+      assl_rsa_encrypt(&k, (const uint8_t *)"a different message entirely", 26, other);
+      dl = 0;
+      utest_bool(assl_rsa_decrypt(&k, other, 256, dec, sizeof dec, &dl) == 0 &&
+                 dl == 26, "accept_other_conforming");
+
+      uint8_t dirty[256];
+      memset(dirty, 0xAB, sizeof dirty);
+      dl = 0xDEAD;
+      utest_bool(assl_rsa_decrypt(&k, bad, 256, dirty, sizeof dirty, &dl) != 0,
+                 "malformed_again");
+      int scrubbed = 1;
+      for (size_t i = 0; i < sizeof dirty; i++) if (dirty[i] != 0) scrubbed = 0;
+      utest_bool(scrubbed, "output_scrubbed_on_error");
+      utest_bool(dl == 0, "outlen_zeroed_on_error"); }
     assl_rsa_free(&k); return utest_end(); }
 
 static int test_bn_rsa_pkcs1_sign(void) {

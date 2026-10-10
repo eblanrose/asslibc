@@ -1,5 +1,22 @@
 #include "asslibc.h"
 
+static uint8_t ct_eq_u8(uint8_t a, uint8_t b) {
+    uint16_t d = (uint16_t)(a ^ b);
+    return (uint8_t)((((d | (uint16_t)(0U - d)) >> 15) ^ 1) & 1) * 0xFF;
+}
+
+static uint8_t ct_ne_u8(uint8_t a, uint8_t b) {
+    return (uint8_t)(ct_eq_u8(a, b) ^ 0xFF);
+}
+
+static uint8_t ct_mask_is_zero(size_t m) {
+    return (uint8_t)(ct_eq_u8((uint8_t)(m | (m >> 8) | (m >> 16) | (m >> 24)), 0));
+}
+
+static uint8_t ct_mask_ge(size_t a, size_t b) {
+    return (uint8_t)(0u - (uint8_t)((b - a - 1) >> (8 * sizeof(size_t) - 1)));
+}
+
 void assl_rsa_init(assl_rsa_key *k) {
     memset(k, 0, sizeof *k);
     assl_bn_init(&k->n); assl_bn_init(&k->e); assl_bn_init(&k->d);
@@ -107,26 +124,61 @@ int assl_rsa_encrypt(const assl_rsa_key *k, const uint8_t *in, size_t inlen, uin
     return r;
 }
 
+static int rsa_pkcs1_unpad(const uint8_t *buf, size_t ksz, uint8_t *out,
+                           size_t outcap, size_t *outlen) {
+    uint8_t bad = 0;
+    bad |= ct_ne_u8(buf[0], 0x00);
+    bad |= ct_ne_u8(buf[1], 0x02);
+
+    size_t sep = 0;
+    uint8_t found = 0;
+    for (size_t i = 2; i < ksz; i++) {
+        uint8_t is_zero = ct_eq_u8(buf[i], 0x00);
+        uint8_t take = is_zero & (uint8_t)(found ^ 0xFF);
+        sep = take ? i : sep;
+        found |= is_zero;
+    }
+
+    bad |= ct_mask_is_zero(found);
+    bad |= (uint8_t)(ct_mask_ge(sep, 10) ^ 0xFF);
+
+    size_t mlen = 0;
+    if (sep < ksz) mlen = ksz - sep - 1;
+    bad |= ct_mask_is_zero(mlen);
+
+    if (outlen) *outlen = mlen;
+    bad |= (uint8_t)(ct_mask_ge(outcap, mlen) ^ 0xFF);
+
+    for (size_t i = 0; i < outcap; i++) {
+        size_t idx = sep + 1 + i;
+        uint8_t byte = 0;
+        if (sep < ksz && idx < ksz) byte = buf[idx];
+        if (i >= mlen) byte = 0;
+        out[i] = byte;
+    }
+
+    return bad ? -1 : 0;
+}
+
 int assl_rsa_decrypt(const assl_rsa_key *k, const uint8_t *in, size_t inlen,
-                     uint8_t *out, size_t *outlen) {
+                     uint8_t *out, size_t outcap, size_t *outlen) {
     size_t ksz = assl_rsa_key_size(k);
     if (!k || !k->have_priv || inlen != ksz || ksz < 11) return -1;
+    if (!out || outcap == 0) return -1;
     uint8_t *buf = (uint8_t *)malloc(ksz);
     if (!buf) return -1;
     int r = -1;
+    size_t mlen = 0;
     if (assl_rsa_private(k, in, inlen, buf)) goto done;
-    if (buf[0] != 0x00 || buf[1] != 0x02) goto done;
-    size_t sep = 0;
-    for (size_t i = 2; i < ksz; i++) {
-        if (buf[i] == 0x00) { sep = i; break; }
+    r = rsa_pkcs1_unpad(buf, ksz, out, outcap, &mlen);
+    if (r == 0) {
+        if (outlen) *outlen = mlen;
+    } else {
+        memset(out, 0, outcap);
+        if (outlen) *outlen = 0;
     }
-    if (sep < 10 || sep == 0) goto done;
-    if (sep - 2 < 8) goto done;
-    size_t mlen = ksz - sep - 1;
-    if (outlen) *outlen = mlen;
-    memcpy(out, buf + sep + 1, mlen);
-    r = 0;
 done:
+    memset(buf, 0, ksz);
     free(buf);
     return r;
 }

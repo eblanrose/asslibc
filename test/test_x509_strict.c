@@ -78,6 +78,45 @@ static void unknown_ext(buf *out, int critical) {
     free(fields.b);
 }
 
+static uint8_t *resign(const uint8_t *der, size_t der_len,
+                       const assl_rsa_key *key, size_t *out_len) {
+    asn1_node outer, tbs;
+    if (asn1_parse(der, der_len, &outer) < 0) return NULL;
+    if (asn1_parse(outer.value, outer.len, &tbs) < 0) return NULL;
+
+    const uint8_t *rest = tbs.end;
+    size_t rest_len = (size_t)(outer.end - tbs.end);
+    asn1_node salgo, sigv;
+    if (asn1_parse(rest, rest_len, &salgo) < 0) return NULL;
+    if (asn1_parse(salgo.end, (size_t)(outer.end - salgo.end), &sigv) < 0) return NULL;
+
+    size_t tbs_raw_len = (size_t)(tbs.end - tbs.raw);
+    buf body = {0};
+    bput(&body, tbs.raw, tbs_raw_len);
+    bput(&body, rest, (size_t)(sigv.raw - rest));
+
+    uint8_t digest[64];
+    assl_hash_one(ASSL_H_SHA256, tbs.raw, tbs_raw_len, digest);
+    uint8_t sig[512];
+    size_t siglen = assl_rsa_key_size(key);
+    if (siglen == 0 || siglen > 512) { free(body.b); return NULL; }
+    if (assl_rsa_sign(key, ASSL_H_SHA256, digest, sig) < 0) { free(body.b); return NULL; }
+
+    buf sigv_out = {0};
+    buf inner = {0};
+    uint8_t zero_unused = 0x00;
+    bput(&inner, &zero_unused, 1);
+    bput(&inner, sig, siglen);
+    wrap(&sigv_out, ASN1_TAG_BIT_STRING, inner.b, inner.len);
+    bput(&body, sigv_out.b, sigv_out.len);
+
+    buf out = {0};
+    wrap(&out, outer.tag, body.b, body.len);
+    free(body.b); free(sigv_out.b); free(inner.b);
+    *out_len = out.len;
+    return out.b;
+}
+
 static uint8_t *add_ext(const uint8_t *der, size_t der_len, int critical, size_t *out_len) {
     asn1_node outer, tbs, exts, extlist;
     if (asn1_parse(der, der_len, &outer) < 0) return NULL;
@@ -156,6 +195,21 @@ int main(void) {
     utest_bool(crit_der != NULL, "splice critical ext");
     utest_bool(noncrit_der != NULL, "splice non-critical ext");
 
+    size_t crit_signed_len = 0, noncrit_signed_len = 0;
+    uint8_t *crit_signed = crit_der ? resign(crit_der, crit_len, &root_key, &crit_signed_len) : NULL;
+    uint8_t *noncrit_signed = noncrit_der ? resign(noncrit_der, noncrit_len, &root_key, &noncrit_signed_len) : NULL;
+    utest_bool(crit_signed != NULL, "resign critical");
+    utest_bool(noncrit_signed != NULL, "resign non-critical");
+    if (crit_signed) {
+        assl_x509_trust_store self;
+        memset(&self, 0, sizeof self);
+        self.der[0] = crit_signed; self.len[0] = crit_signed_len; self.count = 1;
+        const uint8_t *ch[1] = { crit_signed };
+        size_t cl[1] = { crit_signed_len };
+        utest_bool(assl_x509_verify_chain(ch, cl, 1, &self, NULL, -1) != 0,
+                   "unknown critical rejected despite valid signature");
+    }
+
     if (crit_der) {
         assl_x509_cert c;
         utest_bool(assl_x509_parse(&c, crit_der, crit_len) == 0, "parse spliced cert");
@@ -171,20 +225,34 @@ int main(void) {
     }
 
     {
-        assl_x509_trust_store strict;
-        memset(&strict, 0, sizeof strict);
-        strict.strict = 1;
+        assl_x509_trust_store lenient;
+        memset(&lenient, 0, sizeof lenient);
+        utest_bool(lenient.strict == 0, "default store is non-strict");
         if (crit_der) {
             const uint8_t *chain[1] = { crit_der };
             size_t clen[1] = { crit_len };
-            strict.der[0] = crit_der; strict.len[0] = crit_len; strict.count = 1;
-            utest_bool(assl_x509_verify_chain(chain, clen, 1, &strict, NULL, -1) != 0,
-                       "strict store refuses spliced anchor");
+            lenient.der[0] = crit_der; lenient.len[0] = crit_len; lenient.count = 1;
+            utest_bool(assl_x509_verify_chain(chain, clen, 1, &lenient, NULL, -1) != 0,
+                       "non-strict store still refuses unknown critical");
+        }
+        if (noncrit_signed) {
+            assl_x509_trust_store lenient2;
+            memset(&lenient2, 0, sizeof lenient2);
+            lenient2.der[0] = noncrit_signed; lenient2.len[0] = noncrit_signed_len;
+            lenient2.count = 1;
+            const uint8_t *chain[1] = { noncrit_signed };
+            size_t clen[1] = { noncrit_signed_len };
+            { assl_x509_cert nc; int pr = assl_x509_parse(&nc, noncrit_signed, noncrit_signed_len);
+                                          assl_x509_free(&nc); }
+            utest_bool(assl_x509_verify_chain(chain, clen, 1, &lenient2, NULL, -1) == 0,
+                       "non-critical unknown accepted");
         }
     }
 
     free(crit_der);
     free(noncrit_der);
+    free(crit_signed);
+    free(noncrit_signed);
     free(root_der);
     free(leaf_der);
     assl_rsa_free(&root_key);

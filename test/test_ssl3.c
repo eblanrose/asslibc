@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <signal.h>
 #include "utest.h"
+#include "test_cert.h"
 #include "asslibc.h"
 #include "../ssl.h"
 
@@ -24,7 +25,8 @@ static const char *k_dq =
 static const char *k_qi =
     "31dd749563f9b36e4228cbdf64a9eca0c6aec38f1246b5e4b9b2ca4d2a3bf8fd9364dbe177c4d1683b307a415936027bd79b6e7c5c55eaa0b774986e7e38ded7c91a36734a191cbe208aeb19c562fb14cf3007e842ee67aa2f484fc38e3e776e5bae9023c5defaa3b319677ae26993b872d7e0dc5bb67b5ff19d8d6823aea1b2";
 
-static const uint8_t dummy_cert[] = { 0x30, 0x03, 0x02, 0x01, 0x01 };
+#define dummy_cert test_cert_der
+#define dummy_cert_len sizeof test_cert_der
 
 static void setup_key(assl_rsa_key *k) {
     assl_rsa_init(k);
@@ -53,7 +55,7 @@ static void *server_thread(void *arg) {
         assl_ssl_init(&ssl, 0);
     assl_ssl_set_verify(&ssl, 0, NULL);
     assl_ssl_set_version(&ssl, SSL3_VERSION);
-    assl_ssl_set_cert(&ssl, dummy_cert, sizeof dummy_cert, ta->key);
+    assl_ssl_set_cert(&ssl, dummy_cert, dummy_cert_len, ta->key);
     ta->result = assl_ssl_handshake(&ssl, ta->fd, ta->fd);
     if (ta->result == 0) {
         char buf[64];
@@ -92,7 +94,7 @@ static int test_ssl3_handshake(void) {
         assl_ssl_init(&client_ssl, 1);
     assl_ssl_set_verify(&client_ssl, 0, NULL);
     assl_ssl_set_version(&client_ssl, SSL3_VERSION);
-    assl_ssl_set_cert(&client_ssl, dummy_cert, sizeof dummy_cert, &k);
+    assl_ssl_set_cert(&client_ssl, dummy_cert, dummy_cert_len, &k);
 
     int cr = assl_ssl_handshake(&client_ssl, sv[0], sv[0]);
     utest_bool(cr == 0, "client_handshake");

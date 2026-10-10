@@ -703,12 +703,14 @@ int assl_x509_verify_chain(const uint8_t *const *chain, const size_t *chain_len,
         if (!assl_x509_dn_raw_eq(&child->issuer, &parent->subject)) goto out;
         if (verify_cert_sig(child, parent) < 0) goto out;
         if (parent->has_basic_constraints && !parent->is_ca) goto out;
+        if (parent->has_unknown_critical) goto out;
         if (store->strict) {
             if (parent->key_usage >= 0 &&
                 !(parent->key_usage & ASSL_X509_KU_KEY_CERT_SIGN)) goto out;
-            if (parent->has_unknown_critical) goto out;
         }
     }
+
+    if (leaf->has_unknown_critical) goto out;
 
     if (store->strict) {
         int max_path_length = ASSL_X509_MAX_CHAIN;
@@ -736,12 +738,12 @@ int assl_x509_verify_chain(const uint8_t *const *chain, const size_t *chain_len,
             assl_x509_free(&anc);
             continue;
         }
+        if (anc.has_unknown_critical) {
+            assl_x509_free(&anc);
+            continue;
+        }
         if (store->strict) {
             if (assl_x509_verify_self(&anc) != 0) {
-                assl_x509_free(&anc);
-                continue;
-            }
-            if (anc.has_unknown_critical) {
                 assl_x509_free(&anc);
                 continue;
             }

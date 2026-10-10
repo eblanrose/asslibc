@@ -151,6 +151,35 @@ static void tls13_derive_traffic_keys(assl_ssl *ssl, const uint8_t *secret,
                        "iv", 2, empty_ctx, 0, iv, ssl->cipher.iv_len);
 }
 
+static void tls13_update_traffic_secret(assl_ssl *ssl, uint8_t *secret) {
+    uint8_t empty_ctx[1] = {0};
+    unsigned hlen = assl_hash_size(ssl->cipher.prf_hash);
+    uint8_t next[64];
+    tls13_expand_label(ssl->cipher.prf_hash, secret, hlen,
+                       "traffic upd", 11, empty_ctx, 0, next, hlen);
+    memcpy(secret, next, hlen);
+}
+
+static void tls13_update_write_keys(assl_ssl *ssl) {
+    uint8_t *secret = ssl->is_client ? ssl->client_application_traffic_secret
+                                     : ssl->server_application_traffic_secret;
+    uint8_t *key = ssl->is_client ? ssl->client_write_key : ssl->server_write_key;
+    uint8_t *iv  = ssl->is_client ? ssl->client_write_iv   : ssl->server_write_iv;
+    tls13_update_traffic_secret(ssl, secret);
+    tls13_derive_traffic_keys(ssl, secret, key, iv);
+    ssl->write_seq_num = 0;
+}
+
+static void tls13_update_read_keys(assl_ssl *ssl) {
+    uint8_t *secret = ssl->is_client ? ssl->server_application_traffic_secret
+                                     : ssl->client_application_traffic_secret;
+    uint8_t *key = ssl->is_client ? ssl->server_write_key : ssl->client_write_key;
+    uint8_t *iv  = ssl->is_client ? ssl->server_write_iv   : ssl->client_write_iv;
+    tls13_update_traffic_secret(ssl, secret);
+    tls13_derive_traffic_keys(ssl, secret, key, iv);
+    ssl->read_seq_num = 0;
+}
+
 static void ssl3_derive_keys(assl_ssl *ssl) {
     uint8_t seed[64];
     memcpy(seed, ssl->server_random, 32);
@@ -186,6 +215,19 @@ static void ssl3_compute_master_secret(assl_ssl *ssl,
     uint8_t seed[64];
     memcpy(seed, ssl->client_random, 32);
     memcpy(seed + 32, ssl->server_random, 32);
+    if (ssl->ems_negotiated && !is_tls13(ssl->version)) {
+        uint8_t session_hash[64];
+        unsigned hlen = assl_hash_size(ssl->cipher.prf_hash);
+        assl_hash_one(ssl->cipher.prf_hash, ssl->hs_messages, ssl->hs_messages_len, session_hash);
+        if (is_tls12(ssl->version))
+            tls12_prf(ssl->cipher.prf_hash, pre_master_secret, pre_master_secret_len,
+                      "extended master secret", session_hash, hlen,
+                      ssl->master_secret, 48);
+        else
+            assl_tls_prf_md5sha1(pre_master_secret, pre_master_secret_len,
+                                 session_hash, hlen, ssl->master_secret, 48);
+        return;
+    }
     if (is_tls12(ssl->version)) {
         tls12_prf(ssl->cipher.prf_hash, pre_master_secret, pre_master_secret_len,
                   "master secret", seed, 64, ssl->master_secret, 48);
@@ -841,6 +883,14 @@ static int ssl3_expect_ccs(assl_ssl *ssl, int fd, uint8_t *rec, size_t *reclen) 
     return 0;
 }
 
+static void ssl3_fatal(assl_ssl *ssl, int fd, uint8_t desc) {
+    uint8_t alert[2] = { SSL3_ALERT_FATAL, desc };
+    if (ssl->write_cipher_active)
+        ssl3_write_encrypted_record(ssl, fd, SSL3_CT_ALERT, alert, 2);
+    else
+        ssl3_write_record(ssl, fd, SSL3_CT_ALERT, alert, 2);
+}
+
 static int ssl3_generate_pre_master_secret(assl_ssl *ssl,
                                            uint8_t *pms, size_t *pms_len) {
     pms[0] = (uint8_t)(ssl->version >> 8);
@@ -904,8 +954,124 @@ int assl_ssl_add_trust(assl_ssl *ssl, const uint8_t *der, size_t len) {
     return 1;
 }
 
+static size_t ssl3_append_common_extensions(assl_ssl *ssl, uint8_t *ext,
+                                            size_t e, size_t cap) {
+    if (ssl->sni_hostname_len > 0) {
+        size_t n = (size_t)ssl->sni_hostname_len;
+        if (e + 4 + 2 + 1 + 2 + n > cap) return 0;
+        ext[e++] = 0x00; ext[e++] = SSL3_EXT_SERVER_NAME;
+        ext[e++] = 0x00; ext[e++] = (uint8_t)(5 + n);
+        ext[e++] = 0x00; ext[e++] = (uint8_t)(3 + n);
+        ext[e++] = 0x00;
+        ext[e++] = (uint8_t)(n >> 8);
+        ext[e++] = (uint8_t)n;
+        memcpy(ext + e, ssl->sni_hostname, n); e += n;
+    }
+
+    if (ssl->alpn_protos_len > 0) {
+        size_t n = ssl->alpn_protos_len;
+        if (e + 4 + 2 + n > cap) return 0;
+        ext[e++] = 0x00; ext[e++] = SSL3_EXT_ALPN;
+        ext[e++] = 0x00; ext[e++] = (uint8_t)(2 + n);
+        ext[e++] = 0x00; ext[e++] = (uint8_t)n;
+        memcpy(ext + e, ssl->alpn_protos, n); e += n;
+    }
+
+    if (!is_tls13(ssl->version)) {
+        if (e + 4 > cap) return 0;
+        ext[e++] = 0x00; ext[e++] = SSL3_EXT_EXTENDED_MASTER_SECRET;
+        ext[e++] = 0x00; ext[e++] = 0x00;
+        ssl->ems_offered = 1;
+    }
+    return e;
+}
+
+int assl_ssl_set_servername(assl_ssl *ssl, const char *hostname) {
+    if (!ssl) return -1;
+    if (!hostname || !*hostname) {
+        ssl->sni_hostname_len = 0;
+        ssl->sni_hostname[0] = 0;
+        return 0;
+    }
+    while (*hostname == '.') hostname++;
+    size_t n = strlen(hostname);
+    while (n > 0 && hostname[n - 1] == '.') n--;
+    if (n == 0) return -1;
+    if (n >= sizeof ssl->sni_hostname) return -1;
+    memcpy(ssl->sni_hostname, hostname, n);
+    ssl->sni_hostname[n] = 0;
+    ssl->sni_hostname_len = (int)n;
+    return 0;
+}
+
+int assl_ssl_set_alpn(assl_ssl *ssl, const uint8_t *protos, size_t len) {
+    if (!ssl) return -1;
+    if (len == 0) {
+        ssl->alpn_protos_len = 0;
+        return 0;
+    }
+    if (!protos || len > sizeof ssl->alpn_protos) return -1;
+    size_t off = 0;
+    while (off < len) {
+        uint8_t n = protos[off];
+        if (n == 0 || off + 1 + n > len) return -1;
+        off += 1 + (size_t)n;
+    }
+    memcpy(ssl->alpn_protos, protos, len);
+    ssl->alpn_protos_len = len;
+    return 0;
+}
+
+const char *assl_ssl_get_negotiated_alpn(const assl_ssl *ssl) {
+    if (!ssl || ssl->negotiated_alpn_len == 0) return NULL;
+    return (const char *)ssl->negotiated_alpn;
+}
+
+const char *assl_ssl_get_server_name(const assl_ssl *ssl) {
+    if (!ssl || ssl->server_name_len == 0) return NULL;
+    return ssl->server_name;
+}
+
+uint16_t assl_ssl_get_group(const assl_ssl *ssl) {
+    return ssl ? ssl->selected_group : 0;
+}
+
+static size_t ssl3_select_alpn(assl_ssl *ssl) {
+    size_t so = 0;
+    while (so < ssl->alpn_protos_len) {
+        size_t slen = ssl->alpn_protos[so];
+        if (slen == 0 || so + 1 + slen > ssl->alpn_protos_len) break;
+        size_t co = 0;
+        while (co < ssl->peer_alpn_protos_len) {
+            size_t clen = ssl->peer_alpn_protos[co];
+            if (clen == 0 || co + 1 + clen > ssl->peer_alpn_protos_len) break;
+            if (clen == slen &&
+                memcmp(ssl->alpn_protos + so + 1, ssl->peer_alpn_protos + co + 1, slen) == 0) {
+                if (slen < sizeof ssl->negotiated_alpn) {
+                    memcpy(ssl->negotiated_alpn, ssl->alpn_protos + so + 1, slen);
+                    ssl->negotiated_alpn[slen] = 0;
+                    ssl->negotiated_alpn_len = slen;
+                }
+                return slen;
+            }
+            co += 1 + clen;
+        }
+        so += 1 + slen;
+    }
+    return 0;
+}
+
+static void ssl3_put_ext_len(uint8_t *buf, size_t *n, size_t ext_bytes) {
+    uint8_t hi = (uint8_t)(ext_bytes >> 8);
+    uint8_t lo = (uint8_t)ext_bytes;
+    buf[(*n)++] = hi;
+    buf[(*n)++] = lo;
+}
+
 static size_t build_tls13_client_hello(assl_ssl *ssl, uint8_t *out) {
     size_t p = 0;
+    uint8_t ext[512];
+    size_t e = 0;
 
     out[p++] = 0x03; out[p++] = 0x03;
 
@@ -932,50 +1098,49 @@ static size_t build_tls13_client_hello(assl_ssl *ssl, uint8_t *out) {
     out[p++] = 1;
     out[p++] = 0;
 
-    size_t ext_start = p;
-    p += 2; 
+    ext[e++] = 0x00; ext[e++] = 0x2b;
+    ext[e++] = 0x00; ext[e++] = 0x03;
+    ext[e++] = 0x02;
+    ext[e++] = 0x03; ext[e++] = 0x04;
 
-    out[p++] = 0x00; out[p++] = 0x2b;
-    out[p++] = 0x00; out[p++] = 0x03;
-    out[p++] = 0x02; 
-    out[p++] = 0x03; out[p++] = 0x04; 
-
-    out[p++] = 0x00; out[p++] = 0x33;
-    size_t ks_len_pos = p;
-    p += 2;
-    out[p++] = 0x00; out[p++] = 0x45;
-    uint16_t named_group = 0x0017; 
-    out[p++] = (uint8_t)(named_group >> 8);
-    out[p++] = (uint8_t)(named_group);
+    ext[e++] = 0x00; ext[e++] = 0x33;
+    ext[e++] = 0x00; ext[e++] = 0x47;
+    ext[e++] = 0x00; ext[e++] = 0x45;
+    ext[e++] = (uint8_t)(SSL3_GROUP_SECP256R1 >> 8);
+    ext[e++] = (uint8_t)(SSL3_GROUP_SECP256R1);
     uint8_t ec_priv[32], ec_pub[64];
     assl_p256_keygen(ec_priv, ec_pub);
     memcpy(ssl->ecdh_priv, ec_priv, 32);
     memcpy(ssl->ecdh_local_pub, ec_pub, 64);
-    out[p++] = 0x00; out[p++] = 0x41; 
-    out[p++] = 0x04; 
-    memcpy(out + p, ec_pub, 64); p += 64;
-    size_t ks_len = p - ks_len_pos - 2;
-    out[ks_len_pos] = (uint8_t)(ks_len >> 8);
-    out[ks_len_pos + 1] = (uint8_t)ks_len;
+    ext[e++] = 0x00; ext[e++] = 0x41;
+    ext[e++] = 0x04;
+    memcpy(ext + e, ec_pub, 64); e += 64;
 
-    out[p++] = 0x00; out[p++] = 0x0d;
-    out[p++] = 0x00; out[p++] = 0x0e;
-    out[p++] = 0x00; out[p++] = 0x0c; 
-    out[p++] = 0x08; out[p++] = 0x04; 
-    out[p++] = 0x08; out[p++] = 0x05; 
-    out[p++] = 0x08; out[p++] = 0x06; 
-    out[p++] = 0x04; out[p++] = 0x01; 
-    out[p++] = 0x05; out[p++] = 0x01; 
-    out[p++] = 0x06; out[p++] = 0x01; 
+    ext[e++] = 0x00; ext[e++] = 0x0d;
+    ext[e++] = 0x00; ext[e++] = 0x0e;
+    ext[e++] = 0x00; ext[e++] = 0x0c;
+    ext[e++] = 0x08; ext[e++] = 0x04;
+    ext[e++] = 0x08; ext[e++] = 0x05;
+    ext[e++] = 0x08; ext[e++] = 0x06;
+    ext[e++] = 0x04; ext[e++] = 0x01;
+    ext[e++] = 0x05; ext[e++] = 0x01;
+    ext[e++] = 0x06; ext[e++] = 0x01;
 
-    out[p++] = 0x00; out[p++] = 0x0a;
-    out[p++] = 0x00; out[p++] = 0x04;
-    out[p++] = 0x00; out[p++] = 0x02; 
-    out[p++] = 0x00; out[p++] = 0x17; 
+    ext[e++] = 0x00; ext[e++] = 0x0a;
+    ext[e++] = 0x00; ext[e++] = 0x04;
+    ext[e++] = 0x00; ext[e++] = 0x02;
+    ext[e++] = (uint8_t)(SSL3_GROUP_SECP256R1 >> 8);
+    ext[e++] = (uint8_t)(SSL3_GROUP_SECP256R1);
 
-    size_t ext_len = p - ext_start - 2;
-    out[ext_start] = (uint8_t)(ext_len >> 8);
-    out[ext_start + 1] = (uint8_t)ext_len;
+    ext[e++] = 0x00; ext[e++] = 0x2d;
+    ext[e++] = 0x00; ext[e++] = 0x02;
+    ext[e++] = 0x01; ext[e++] = 0x01;
+
+    e = ssl3_append_common_extensions(ssl, ext, e, sizeof ext);
+    if (e == 0) return 0;
+
+    ssl3_put_ext_len(out, &p, e);
+    memcpy(out + p, ext, e); p += e;
 
     return p;
 }
@@ -1030,14 +1195,50 @@ static size_t build_tls13_server_hello(assl_ssl *ssl, uint8_t *out) {
     return p;
 }
 
+static size_t build_tls13_hello_retry_request(assl_ssl *ssl, uint8_t *out) {
+    size_t p = 0;
+
+    out[p++] = 0x03; out[p++] = 0x03;
+    memcpy(out + p, TLS13_HRR_RANDOM, 32); p += 32;
+    out[p++] = ssl->client_session_id_len;
+    memcpy(out + p, ssl->client_session_id, ssl->client_session_id_len);
+    p += ssl->client_session_id_len;
+    out[p++] = (uint8_t)(ssl->cipher.cipher_suite >> 8);
+    out[p++] = (uint8_t)ssl->cipher.cipher_suite;
+    out[p++] = 0;
+
+    uint8_t ext[16];
+    size_t e = 0;
+    ext[e++] = 0x00; ext[e++] = SSL3_EXT_SUPPORTED_VERSIONS;
+    ext[e++] = 0x00; ext[e++] = 0x02;
+    ext[e++] = 0x03; ext[e++] = 0x04;
+    ext[e++] = 0x00; ext[e++] = SSL3_EXT_KEY_SHARE;
+    ext[e++] = 0x00; ext[e++] = 0x02;
+    ext[e++] = (uint8_t)(SSL3_GROUP_SECP256R1 >> 8);
+    ext[e++] = (uint8_t)SSL3_GROUP_SECP256R1;
+
+    ssl3_put_ext_len(out, &p, e);
+    memcpy(out + p, ext, e); p += e;
+    return p;
+}
+
 static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
     uint8_t recbuf[SSL3_MAX_RECORD_LEN + 256];
     size_t reclen;
     int rtype;
     int secure_renegotiation = 0;
+    int ccs_seen = 0;
 
-    {
-        rtype = ssl3_read_dispatch(ssl, in_fd, recbuf, &reclen);
+    for (int ch_round = 0; ch_round < 2; ch_round++) {
+        for (;;) {
+            rtype = ssl3_read_dispatch(ssl, in_fd, recbuf, &reclen);
+            if (rtype == SSL3_CT_CHANGE_CIPHER_SPEC) {
+                if (reclen != 1 || recbuf[0] != 1) return -1;
+                ccs_seen = 1;
+                continue;
+            }
+            break;
+        }
         if (rtype != SSL3_CT_HANDSHAKE) return -1;
 
         hs_cursor c;
@@ -1110,17 +1311,36 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         for (uint8_t i = 0; i < comp_len; i++)
             if (cur_u8(&b) != 0) return -1;
 
-        if (is_tls13(ssl->version)) {
-            if (cur_left(&b) < 2) return -1;
-            hs_cursor exts;
+        int want_hrr = 0;
+        int offered_secp256r1 = 0;
+        if (cur_left(&b) >= 2) {
+            hs_cursor exts, ext;
             if (cur_sub(&b, 2, &exts) < 0) return -1;
-            int have_key_share = 0;
+            int saw_supported_versions = 0;
             while (cur_left(&exts) >= 4) {
                 uint16_t ext_type = cur_u16(&exts);
-                hs_cursor ext;
                 if (cur_sub(&exts, 2, &ext) < 0) return -1;
 
-                if (ext_type == 0x0033) {
+                if (ext_type == SSL3_EXT_SUPPORTED_VERSIONS) {
+                    saw_supported_versions = 1;
+                    if (!is_tls13(ssl->version)) continue;
+                    if (cur_left(&ext) < 1) return -1;
+                    uint8_t vlen = ext.p[0];
+                    if (vlen < 2 || cur_left(&ext) != 1 + (size_t)vlen) return -1;
+                    if ((vlen & 1) != 0) return -1;
+                    int has_1_3 = 0;
+                    for (size_t vi = 0; vi + 1 < vlen; vi += 2)
+                        if (ext.p[1 + vi] == 0x03 && ext.p[1 + vi + 1] == 0x04)
+                            has_1_3 = 1;
+                    if (!has_1_3) {
+                        ssl3_fatal(ssl, out_fd, SSL3_ALERT_PROTOCOL_VERSION);
+                        return -1;
+                    }
+                } else if (ext_type == SSL3_EXT_SUPPORTED_GROUPS) {
+                    while (cur_left(&ext) >= 2)
+                        if (cur_u16(&ext) == SSL3_GROUP_SECP256R1) offered_secp256r1 = 1;
+                } else if (ext_type == SSL3_EXT_KEY_SHARE) {
+                    if (!is_tls13(ssl->version)) continue;
                     hs_cursor shares;
                     if (cur_sub(&ext, 2, &shares) < 0) return -1;
                     while (cur_left(&shares) >= 4) {
@@ -1128,31 +1348,89 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
                         uint32_t klen = cur_u16(&shares);
                         const uint8_t *entry = cur_take(&shares, klen);
                         if (entry == NULL) return -1;
-                        if (group == 0x0017 && klen == 65) {
-                            if (entry[0] != 0x04) return -1;
+                        if (group == SSL3_GROUP_SECP256R1) {
+                            if (klen != 65 || entry[0] != 0x04) {
+                                ssl3_fatal(ssl, out_fd, SSL3_ALERT_ILLEGAL_PARAMETER);
+                                return -1;
+                            }
                             memcpy(ssl->ecdh_peer_pub, entry + 1, 64);
-                            have_key_share = 1;
+                            ssl->selected_group = SSL3_GROUP_SECP256R1;
                         }
+                    }
+                } else if (ext_type == SSL3_EXT_SERVER_NAME) {
+                    if (cur_left(&ext) < 2) return -1;
+                    size_t list_len = ((size_t)ext.p[0] << 8) | ext.p[1];
+                    if (list_len == 0 || cur_left(&ext) != 2 + list_len) return -1;
+                    size_t off = 2, stop = 2 + list_len;
+                    while (off + 3 <= stop) {
+                        uint8_t name_type = ext.p[off];
+                        size_t name_len = ((size_t)ext.p[off + 1] << 8) | ext.p[off + 2];
+                        off += 3;
+                        if (off + name_len > stop) return -1;
+                        if (name_type == 0) {
+                            if (name_len == 0 || name_len >= sizeof ssl->server_name)
+                                return -1;
+                            memcpy(ssl->server_name, ext.p + off, name_len);
+                            ssl->server_name[name_len] = 0;
+                            ssl->server_name_len = name_len;
+                        }
+                        off += name_len;
+                    }
+                    if (off != stop) return -1;
+                } else if (ext_type == SSL3_EXT_ALPN) {
+                    if (cur_left(&ext) < 2) return -1;
+                    uint16_t plen = ((uint16_t)ext.p[0] << 8) | ext.p[1];
+                    if (cur_left(&ext) != 2 + (size_t)plen) return -1;
+                    if (plen > 0 && plen <= sizeof ssl->peer_alpn_protos) {
+                        memcpy(ssl->peer_alpn_protos, ext.p + 2, plen);
+                        ssl->peer_alpn_protos_len = plen;
+                    }
+                } else if (ext_type == SSL3_EXT_EXTENDED_MASTER_SECRET) {
+                    if (!is_tls13(ssl->version) && cur_left(&ext) == 0)
+                        ssl->ems_negotiated = 1;
+                } else if (ext_type == 0xff01) {
+                    secure_renegotiation = 1;
+                    if (cur_left(&ext) == 1) {
+                        if (ext.p[0] != 0x00) return -1;
+                    } else if (cur_left(&ext) != 0) {
+                        return -1;
                     }
                 }
             }
-            if (!have_key_share) return -1;
-        } else if (cur_left(&b) >= 2) {
-            hs_cursor exts, ext;
-            if (cur_sub(&b, 2, &exts) < 0) return -1;
-            while (cur_left(&exts) >= 4) {
-                uint16_t ext_type = cur_u16(&exts);
-                if (cur_sub(&exts, 2, &ext) < 0) return -1;
-                if (ext_type == 0xff01) {
-                    secure_renegotiation = 1;
-                    if (cur_left(&ext) != 1 || ext.p[0] != 0x00) return -1;
+            if (!b.ok || !exts.ok) return -1;
+            if (is_tls13(ssl->version)) {
+                if (!saw_supported_versions) {
+                    ssl3_fatal(ssl, out_fd, SSL3_ALERT_PROTOCOL_VERSION);
+                    return -1;
+                }
+                if (ssl->selected_group == 0) {
+                    if (offered_secp256r1 && ch_round == 0) {
+                        want_hrr = 1;
+                    } else {
+                        ssl3_fatal(ssl, out_fd, SSL3_ALERT_HANDSHAKE_FAILURE);
+                        return -1;
+                    }
                 }
             }
+        } else if (is_tls13(ssl->version)) {
+            ssl3_fatal(ssl, out_fd, SSL3_ALERT_DECODE_ERROR);
+            return -1;
         }
-        if (!b.ok) return -1;
 
         ssl3_hs_update_digest(ssl, SSL3_HS_CLIENT_HELLO, body, hs_len);
         ssl->state = SSL3_STATE_CLIENT_HELLO_SENT;
+
+        if (want_hrr) {
+            if (ssl3_hs_message_hash(ssl) < 0) return -1;
+            uint8_t hrr[128];
+            size_t hp = build_tls13_hello_retry_request(ssl, hrr);
+            if (ssl3_write_handshake(ssl, out_fd, SSL3_HS_SERVER_HELLO, hrr, hp) < 0)
+                return -1;
+            ssl->hrr_done = 1;
+            ssl->selected_group = 0;
+            continue;
+        }
+        break;
     }
 
     if (!assl_rng_is_secure()) return -1;
@@ -1163,7 +1441,9 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         size_t p = build_tls13_server_hello(ssl, sh);
         ssl3_write_handshake(ssl, out_fd, SSL3_HS_SERVER_HELLO, sh, p);
     } else {
-        uint8_t sh[2 + 32 + 1 + 2 + 1 + 2 + 5];
+        uint8_t sh[128];
+        uint8_t ext[64];
+        size_t e = 0;
         size_t p = 0;
         uint16_t rv = record_version(ssl->version);
         sh[p++] = (uint8_t)(rv >> 8); sh[p++] = (uint8_t)(rv & 0xFF);
@@ -1172,16 +1452,30 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         sh[p++] = (uint8_t)(ssl->cipher.cipher_suite >> 8);
         sh[p++] = (uint8_t)ssl->cipher.cipher_suite;
         sh[p++] = 0;
+
         if (secure_renegotiation) {
-            size_t exts_len_pos = p;
-            p += 2;
-            size_t ext_body_pos = p;
-            sh[p++] = 0xff; sh[p++] = 0x01;
-            sh[p++] = 0x00; sh[p++] = 0x01;
-            sh[p++] = 0x00;
-            sh[exts_len_pos] = (uint8_t)((p - ext_body_pos) >> 8);
-            sh[exts_len_pos + 1] = (uint8_t)(p - ext_body_pos);
+            ext[e++] = 0xff; ext[e++] = 0x01;
+            ext[e++] = 0x00; ext[e++] = 0x01;
+            ext[e++] = 0x00;
         }
+        if (ssl->ems_negotiated) {
+            ext[e++] = 0x00; ext[e++] = SSL3_EXT_EXTENDED_MASTER_SECRET;
+            ext[e++] = 0x00; ext[e++] = 0x00;
+        }
+        size_t alpn_len = ssl3_select_alpn(ssl);
+        if (alpn_len > 0) {
+            ext[e++] = 0x00; ext[e++] = SSL3_EXT_ALPN;
+            ext[e++] = 0x00; ext[e++] = (uint8_t)(3 + alpn_len);
+            ext[e++] = 0x00; ext[e++] = (uint8_t)(1 + alpn_len);
+            ext[e++] = (uint8_t)alpn_len;
+            memcpy(ext + e, ssl->negotiated_alpn, alpn_len); e += alpn_len;
+        }
+
+        if (e > 0) {
+            ssl3_put_ext_len(sh, &p, e);
+            memcpy(sh + p, ext, e); p += e;
+        }
+        if (p > sizeof sh) return -1;
         ssl3_write_handshake(ssl, out_fd, SSL3_HS_SERVER_HELLO, sh, p);
     }
     ssl->state = SSL3_STATE_SERVER_HELLO_RECEIVED;
@@ -1205,8 +1499,21 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
 
 
         {
-            uint8_t ee_body[2] = { 0x00, 0x00 };
-            ssl3_write_handshake(ssl, out_fd, SSL3_HS_ENCRYPTED_EXTENSIONS, ee_body, 2);
+            uint8_t ee[128];
+            size_t e = 2;
+            size_t alpn_len = ssl3_select_alpn(ssl);
+            if (alpn_len > 0) {
+                ee[e++] = 0x00; ee[e++] = SSL3_EXT_ALPN;
+                ee[e++] = 0x00; ee[e++] = (uint8_t)(3 + alpn_len);
+                ee[e++] = 0x00; ee[e++] = (uint8_t)(1 + alpn_len);
+                ee[e++] = (uint8_t)alpn_len;
+                memcpy(ee + e, ssl->negotiated_alpn, alpn_len); e += alpn_len;
+            }
+            if (e > sizeof ee) return -1;
+            size_t ext_bytes = e - 2;
+            ee[0] = (uint8_t)(ext_bytes >> 8);
+            ee[1] = (uint8_t)ext_bytes;
+            ssl3_write_handshake(ssl, out_fd, SSL3_HS_ENCRYPTED_EXTENSIONS, ee, e);
         }
 
         if (ssl->have_cert && ssl->cert_der && ssl->cert_der_len > 0) {
@@ -1266,7 +1573,7 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
             ssl3_write_handshake(ssl, out_fd, SSL3_HS_FINISHED, verify_data, vd_len);
         }
 
-        if (ssl3_expect_ccs(ssl, in_fd, recbuf, &reclen) < 0) return -1;
+        if (!ccs_seen && ssl3_expect_ccs(ssl, in_fd, recbuf, &reclen) < 0) return -1;
         ssl->read_cipher_active = 1;
         ssl->read_seq_num = 0;
 
@@ -1377,13 +1684,26 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         } else if (ssl->have_cert) {
             if (hs_len < 3) return -1;
             size_t ek_len = ((size_t)recbuf[4] << 8) | recbuf[5];
-            if (ek_len != hs_len - 2) return -1;
-            int rc = assl_rsa_decrypt(&ssl->rsa_key, recbuf + 6, ek_len,
-                                      pre_master_secret, &pms_len);
-            if (rc < 0) return -1;
+            int rc = -1;
+            if (ek_len == hs_len - 2)
+                rc = assl_rsa_decrypt(&ssl->rsa_key, recbuf + 6, ek_len,
+                                      pre_master_secret, sizeof pre_master_secret,
+                                      &pms_len);
+            if (rc == 0) {
+                uint8_t v_ok = ct_eq_u8(pre_master_secret[0], (uint8_t)(ssl->version >> 8)) &
+                               ct_eq_u8(pre_master_secret[1], (uint8_t)ssl->version);
+                uint8_t len_ok = ct_eq_u8((uint8_t)pms_len, 48);
+                if ((v_ok & len_ok) != 0xFF) rc = -1;
+            }
+            if (rc < 0) {
+                if (ssl3_generate_pre_master_secret(ssl, pre_master_secret, &pms_len) < 0)
+                    return -1;
+            }
         } else {
             return -1;
         }
+
+        ssl3_hs_update_digest(ssl, SSL3_HS_CLIENT_KEY_EXCHANGE, recbuf + 4, hs_len);
 
         ssl3_compute_master_secret(ssl, pre_master_secret, pms_len);
         ssl3_derive_keys(ssl);
@@ -1395,8 +1715,6 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
             memcpy(ssl->write_iv_current, ssl->server_write_iv, ssl->cipher.iv_len);
             memcpy(ssl->read_iv_current, ssl->client_write_iv, ssl->cipher.iv_len);
         }
-
-        ssl3_hs_update_digest(ssl, SSL3_HS_CLIENT_KEY_EXCHANGE, recbuf + 4, hs_len);
     }
 
     {
@@ -1432,6 +1750,71 @@ static int ssl3_server_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
     return 0;
 }
 
+static int tls13_cv_hash_for_scheme(uint16_t scheme, assl_hash_t *h, int *pss) {
+    switch (scheme) {
+        case 0x0804: *h = ASSL_H_SHA256; *pss = 1; return 0;
+        case 0x0805: *h = ASSL_H_SHA384; *pss = 1; return 0;
+        case 0x0806: *h = ASSL_H_SHA512; *pss = 1; return 0;
+        case 0x0401: *h = ASSL_H_SHA256; *pss = 0; return 0;
+        case 0x0501: *h = ASSL_H_SHA384; *pss = 0; return 0;
+        case 0x0601: *h = ASSL_H_SHA512; *pss = 0; return 0;
+        default: return -1;
+    }
+}
+
+static int tls13_verify_certificate_verify(assl_ssl *ssl, int out_fd,
+                                           const uint8_t *msg, size_t msg_len) {
+    if (!ssl->have_peer_key) {
+        ssl3_fatal(ssl, out_fd, SSL3_ALERT_UNEXPECTED_MSG);
+        return -1;
+    }
+    if (msg_len < 4) {
+        ssl3_fatal(ssl, out_fd, SSL3_ALERT_DECODE_ERROR);
+        return -1;
+    }
+    uint16_t scheme = ((uint16_t)msg[0] << 8) | msg[1];
+    size_t sig_len = ((size_t)msg[2] << 8) | msg[3];
+    if (sig_len != msg_len - 4) {
+        ssl3_fatal(ssl, out_fd, SSL3_ALERT_DECODE_ERROR);
+        return -1;
+    }
+    const uint8_t *sig = msg + 4;
+
+    assl_hash_t hash;
+    int pss;
+    if (tls13_cv_hash_for_scheme(scheme, &hash, &pss) != 0) {
+        ssl3_fatal(ssl, out_fd, SSL3_ALERT_ILLEGAL_PARAMETER);
+        return -1;
+    }
+    unsigned hlen = assl_hash_size(hash);
+    if (hlen == 0 || hlen > 64) return -1;
+
+    uint8_t transcript[64];
+    assl_hash_one(hash, ssl->hs_messages, ssl->hs_messages_len, transcript);
+
+    static const char ctx[] = "TLS 1.3, server CertificateVerify";
+    uint8_t content[64 + sizeof(ctx) + 1 + 64];
+    size_t cp = 0;
+    memset(content, 0x20, 64); cp = 64;
+    memcpy(content + cp, ctx, sizeof(ctx) - 1); cp += sizeof(ctx) - 1;
+    content[cp++] = 0x00;
+    memcpy(content + cp, transcript, hlen); cp += hlen;
+
+    uint8_t digest[64];
+    assl_hash_one(hash, content, cp, digest);
+
+    int ok;
+    if (pss)
+        ok = assl_rsa_verify_pss(&ssl->peer_rsa_key, hash, digest, hlen, sig, sig_len);
+    else
+        ok = assl_rsa_verify(&ssl->peer_rsa_key, hash, digest, sig, sig_len);
+    if (ok < 0) {
+        ssl3_fatal(ssl, out_fd, SSL3_ALERT_DECRYPT_ERROR);
+        return -1;
+    }
+    return 0;
+}
+
 static int ssl3_client_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
     uint8_t recbuf[SSL3_MAX_RECORD_LEN + 256];
     size_t reclen;
@@ -1445,7 +1828,7 @@ static int ssl3_client_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         size_t p = build_tls13_client_hello(ssl, ch);
         if (ssl3_write_handshake(ssl, out_fd, SSL3_HS_CLIENT_HELLO, ch, p) < 0) return -1;
     } else {
-        uint8_t ch[2 + 32 + 1 + 2 + 24 + 1 + 1 + 2 + 60];
+        uint8_t ch[2 + 32 + 1 + 2 + 24 + 1 + 1 + 2 + 512];
         size_t p = 0;
         uint16_t rv = record_version(ssl->version);
         ch[p++] = (uint8_t)(rv >> 8); ch[p++] = (uint8_t)(rv & 0xFF);
@@ -1479,35 +1862,38 @@ static int ssl3_client_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
                     ssl->client_suites[ssl->client_suites_count++] = ssl3_suites[i];
             }
         }
-        suite_buf[ns++] = 0x56; suite_buf[ns++] = 0x00;
-
         ch[p++] = (uint8_t)(ns >> 8);
         ch[p++] = (uint8_t)ns;
         memcpy(ch + p, suite_buf, ns); p += ns;
 
         ch[p++] = 1; ch[p++] = 0;
 
-        uint16_t ext_total_pos = p;
-        ch[p++] = 0; ch[p++] = 0; 
+        uint8_t ext[512];
+        size_t e = 0;
         if (is_tls12(ssl->version)) {
-            ch[p++] = 0x00; ch[p++] = 0x0d; 
-            ch[p++] = 0x00; ch[p++] = 0x08;
-            ch[p++] = 0x00; ch[p++] = 0x06; 
-            ch[p++] = 0x04; ch[p++] = 0x01;
-            ch[p++] = 0x05; ch[p++] = 0x01;
-            ch[p++] = 0x06; ch[p++] = 0x01;
-            ch[p++] = 0x00; ch[p++] = 0x0a; 
-            ch[p++] = 0x00; ch[p++] = 0x04;
-            ch[p++] = 0x00; ch[p++] = 0x02; 
-            ch[p++] = 0x00; ch[p++] = 0x17; 
-            ch[p++] = 0x00; ch[p++] = 0x0b; 
-            ch[p++] = 0x00; ch[p++] = 0x02;
-            ch[p++] = 0x01;                 
-            ch[p++] = 0x00;                 
-            ch[ext_total_pos] = (uint8_t)((p - ext_total_pos - 2) >> 8);
-            ch[ext_total_pos + 1] = (uint8_t)(p - ext_total_pos - 2);
+            ext[e++] = 0x00; ext[e++] = 0x0d;
+            ext[e++] = 0x00; ext[e++] = 0x08;
+            ext[e++] = 0x00; ext[e++] = 0x06;
+            ext[e++] = 0x04; ext[e++] = 0x01;
+            ext[e++] = 0x05; ext[e++] = 0x01;
+            ext[e++] = 0x06; ext[e++] = 0x01;
+            ext[e++] = 0x00; ext[e++] = 0x0a;
+            ext[e++] = 0x00; ext[e++] = 0x04;
+            ext[e++] = 0x00; ext[e++] = 0x02;
+            ext[e++] = (uint8_t)(SSL3_GROUP_SECP256R1 >> 8);
+            ext[e++] = (uint8_t)SSL3_GROUP_SECP256R1;
+            ext[e++] = 0x00; ext[e++] = 0x0b;
+            ext[e++] = 0x00; ext[e++] = 0x02;
+            ext[e++] = 0x01;
+            ext[e++] = 0x00;
         }
-        if (p > 512) return -1;
+        e = ssl3_append_common_extensions(ssl, ext, e, sizeof ext);
+        if (e == 0) return -1;
+
+        ssl3_put_ext_len(ch, &p, e);
+        memcpy(ch + p, ext, e); p += e;
+
+        if (p > sizeof ch) return -1;
         if (ssl3_write_handshake(ssl, out_fd, SSL3_HS_CLIENT_HELLO, ch, p) < 0) return -1;
     }
     ssl->state = SSL3_STATE_CLIENT_HELLO_SENT;
@@ -1543,6 +1929,42 @@ static int ssl3_client_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         ssl->cipher = *chosen_cipher;
         p += 2;
         p += 1;
+
+        if (!is_tls13(ssl->version)) {
+            const uint8_t *sh_end = recbuf + 4 + hs_len;
+            if (p + 2 <= sh_end) {
+                size_t ext_total = ((size_t)p[0] << 8) | p[1];
+                const uint8_t *q = p + 2;
+                const uint8_t *q_end = q + ext_total;
+                if (q_end > sh_end) q_end = sh_end;
+                int saw_ems = 0;
+                while (q + 4 <= q_end) {
+                    uint16_t ext_type = ((uint16_t)q[0] << 8) | q[1];
+                    size_t ext_len = ((size_t)q[2] << 8) | q[3];
+                    q += 4;
+                    if (q + ext_len > q_end) break;
+                    if (ext_type == SSL3_EXT_EXTENDED_MASTER_SECRET && ext_len == 0) {
+                        saw_ems = 1;
+                    } else if (ext_type == SSL3_EXT_ALPN && ext_len >= 3) {
+                        size_t plen = q[2];
+                        if (plen > 0 && 3 + plen == ext_len &&
+                            plen < sizeof ssl->negotiated_alpn) {
+                            memcpy(ssl->negotiated_alpn, q + 3, plen);
+                            ssl->negotiated_alpn[plen] = 0;
+                            ssl->negotiated_alpn_len = plen;
+                        }
+                    }
+                    q += ext_len;
+                }
+                if (ssl->ems_offered) {
+                    if (!saw_ems) {
+                        ssl3_fatal(ssl, out_fd, SSL3_ALERT_INSUFFICIENT_SECURITY);
+                        return -1;
+                    }
+                    ssl->ems_negotiated = 1;
+                }
+            }
+        }
 
         if (is_tls13(ssl->version) && tls13_is_hello_retry_request(ssl)) {
             if (hrr_count != 0) return -1;
@@ -1648,8 +2070,32 @@ static int ssl3_client_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         {
             rtype = ssl3_read_dispatch(ssl, in_fd, recbuf, &reclen);
             if (rtype != SSL3_CT_HANDSHAKE) return -1;
-            ssl3_hs_update_digest(ssl, SSL3_HS_ENCRYPTED_EXTENSIONS, recbuf + 4,
-                                  ((size_t)recbuf[1] << 16) | ((size_t)recbuf[2] << 8) | recbuf[3]);
+            size_t ee_len = ((size_t)recbuf[1] << 16) | ((size_t)recbuf[2] << 8) | recbuf[3];
+            ssl3_hs_update_digest(ssl, SSL3_HS_ENCRYPTED_EXTENSIONS, recbuf + 4, ee_len);
+
+            if (ssl->alpn_protos_len > 0 && ee_len >= 2) {
+                size_t ext_total = ((size_t)recbuf[4] << 8) | recbuf[5];
+                const uint8_t *q = recbuf + 6;
+                const uint8_t *q_end = q + ext_total;
+                const uint8_t *ee_end = recbuf + 4 + ee_len;
+                if (q_end > ee_end) q_end = ee_end;
+                while (q + 4 <= q_end) {
+                    uint16_t ext_type = ((uint16_t)q[0] << 8) | q[1];
+                    size_t ext_len = ((size_t)q[2] << 8) | q[3];
+                    q += 4;
+                    if (q + ext_len > q_end) break;
+                    if (ext_type == SSL3_EXT_ALPN && ext_len >= 3) {
+                        size_t plen = q[2];
+                        if (plen > 0 && 3 + plen == ext_len &&
+                            plen < sizeof ssl->negotiated_alpn) {
+                            memcpy(ssl->negotiated_alpn, q + 3, plen);
+                            ssl->negotiated_alpn[plen] = 0;
+                            ssl->negotiated_alpn_len = plen;
+                        }
+                    }
+                    q += ext_len;
+                }
+            }
         }
 
         {
@@ -1716,8 +2162,19 @@ static int ssl3_client_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         {
             rtype = ssl3_read_dispatch(ssl, in_fd, recbuf, &reclen);
             if (rtype != SSL3_CT_HANDSHAKE) return -1;
-            ssl3_hs_update_digest(ssl, SSL3_HS_CERTIFICATE_VERIFY, recbuf + 4,
-                                  ((size_t)recbuf[1] << 16) | ((size_t)recbuf[2] << 8) | recbuf[3]);
+            uint8_t cv_type = recbuf[0];
+            size_t cv_len = ((size_t)recbuf[1] << 16) | ((size_t)recbuf[2] << 8) | recbuf[3];
+            if (cv_type != SSL3_HS_CERTIFICATE_VERIFY) {
+                ssl3_fatal(ssl, out_fd, SSL3_ALERT_UNEXPECTED_MSG);
+                return -1;
+            }
+            if (4 + cv_len > reclen) {
+                ssl3_fatal(ssl, out_fd, SSL3_ALERT_DECODE_ERROR);
+                return -1;
+            }
+            if (tls13_verify_certificate_verify(ssl, out_fd, recbuf + 4, cv_len) < 0)
+                return -1;
+            ssl3_hs_update_digest(ssl, SSL3_HS_CERTIFICATE_VERIFY, recbuf + 4, cv_len);
         }
 
         rtype = ssl3_read_dispatch(ssl, in_fd, recbuf, &reclen);
@@ -1979,6 +2436,16 @@ int assl_ssl_handshake(assl_ssl *ssl, int in_fd, int out_fd) {
         return ssl3_server_handshake(ssl, in_fd, out_fd);
 }
 
+int assl_ssl_key_update(assl_ssl *ssl, int fd, int request) {
+    if (!ssl || !is_tls13(ssl->version)) return -1;
+    if (ssl->state != SSL3_STATE_CONNECTED) return -1;
+    if (ssl->write_seq_num == UINT64_MAX) return -1;
+    uint8_t body = request ? 1 : 0;
+    if (ssl3_write_handshake(ssl, fd, SSL3_HS_KEY_UPDATE, &body, 1) < 0) return -1;
+    tls13_update_write_keys(ssl);
+    return 0;
+}
+
 int assl_ssl_read(assl_ssl *ssl, int fd, void *buf, size_t len) {
     uint8_t recbuf[SSL3_MAX_RECORD_LEN + 256];
 
@@ -2011,6 +2478,24 @@ int assl_ssl_read(assl_ssl *ssl, int fd, void *buf, size_t len) {
             continue;
         }
         if (rtype == SSL3_CT_CHANGE_CIPHER_SPEC) continue;
+        if (rtype == SSL3_CT_HANDSHAKE && is_tls13(ssl->version) &&
+            recbuf[0] == SSL3_HS_KEY_UPDATE) {
+            size_t ku_len = ((size_t)recbuf[1] << 16) | ((size_t)recbuf[2] << 8) | recbuf[3];
+            if (ku_len != 1 || reclen < 5 || recbuf[4] > 1) return -1;
+            tls13_update_read_keys(ssl);
+            if (recbuf[4] == 1) {
+                if (assl_ssl_key_update(ssl, fd, 0) < 0) return -1;
+            }
+            continue;
+        }
+        if (rtype == SSL3_CT_HANDSHAKE && is_tls13(ssl->version) &&
+            recbuf[0] == SSL3_HS_NEW_SESSION_TICKET) {
+            continue;
+        }
+        if (rtype == SSL3_CT_HANDSHAKE && is_tls13(ssl->version)) {
+            ssl3_fatal(ssl, fd, SSL3_ALERT_UNEXPECTED_MSG);
+            return -1;
+        }
         if (rtype != SSL3_CT_APPLICATION_DATA) continue;
 
         if (reclen > SSL3_MAX_RECORD_LEN) return -1;

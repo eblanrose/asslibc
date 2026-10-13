@@ -240,6 +240,92 @@ static int test_x509_generate(void) {
     return utest_end();
 }
 
+static int test_x509_generate_san(void) {
+    utest_begin("x509-generate-san");
+
+    assl_rsa_key k;
+    setup_key(&k);
+
+    assl_x509_dn_pair dn[1];
+    dn[0].attr = ASSL_X509_DN_CN;
+    dn[0].value = (const uint8_t *)"example.test";
+    dn[0].value_len = 12;
+
+    static const char *const sans[] = {
+        "example.test", "www.example.test", "127.0.0.1", "::1"
+    };
+
+    uint8_t serial[2] = { 0x10, 0x01 };
+
+    assl_x509_params params = {0};
+    params.subject_attrs = dn;
+    params.subject_attr_count = 1;
+    params.serial = serial;
+    params.serial_len = sizeof serial;
+    params.validity.not_before.year = 2024; params.validity.not_before.month = 1;
+    params.validity.not_before.day = 1;
+    params.validity.not_after.year = 2034;  params.validity.not_after.month = 12;
+    params.validity.not_after.day = 31;
+    params.subject_key = &k;
+    params.sig_algo = ASSL_X509_SIG_SHA256_RSA;
+    params.san_names = sans;
+    params.san_name_count = 4;
+
+    uint8_t *der = NULL;
+    size_t der_len = 0;
+    int rc = assl_x509_generate_self_signed(&params, &der, &der_len);
+    utest_bool(rc == 0, "generate");
+
+    if (der) {
+        assl_x509_cert cert;
+        rc = assl_x509_parse(&cert, der, der_len);
+        utest_bool(rc == 0, "parse_generated");
+        utest_bool(cert.has_san, "has_san");
+        utest_bool(cert.san_dns_count == 2, "san_dns_count");
+        utest_bool(cert.san_ip_count == 2, "san_ip_count");
+        utest_bool(assl_x509_verify_self(&cert) == 0, "verify_self");
+
+        utest_bool(assl_x509_check_hostname(&cert, "www.example.test") == 0, "match_dns");
+        utest_bool(assl_x509_check_hostname(&cert, "example.test") == 0, "match_cn_dns");
+        utest_bool(assl_x509_check_hostname(&cert, "bogus.test") != 0, "reject_dns");
+        utest_bool(assl_x509_check_hostname(&cert, "127.0.0.1") == 0, "match_ip4");
+        utest_bool(assl_x509_check_hostname(&cert, "::1") == 0, "match_ip6");
+        utest_bool(assl_x509_check_hostname(&cert, "10.0.0.1") != 0, "reject_ip");
+        assl_x509_free(&cert);
+        free(der);
+    }
+
+    static const char *const sans2[] = { "empty.example.test" };
+    assl_x509_params p2 = {0};
+    p2.serial = serial;
+    p2.serial_len = sizeof serial;
+    p2.validity.not_before.year = 2024; p2.validity.not_before.month = 1;
+    p2.validity.not_before.day = 1;
+    p2.validity.not_after.year = 2034;  p2.validity.not_after.month = 12;
+    p2.validity.not_after.day = 31;
+    p2.subject_key = &k;
+    p2.sig_algo = ASSL_X509_SIG_SHA256_RSA;
+    p2.san_names = sans2;
+    p2.san_name_count = 1;
+
+    uint8_t *der2 = NULL;
+    size_t der2_len = 0;
+    rc = assl_x509_generate_self_signed(&p2, &der2, &der2_len);
+    utest_bool(rc == 0, "generate_empty_subject");
+    if (der2) {
+        assl_x509_cert cert;
+        utest_bool(assl_x509_parse(&cert, der2, der2_len) == 0, "parse_empty_subject");
+        utest_bool(cert.subject_attr_count == 0, "empty_subject");
+        utest_bool(cert.san_dns_count == 1, "san_present");
+        utest_bool(assl_x509_verify_self(&cert) == 0, "verify_self_empty_subject");
+        assl_x509_free(&cert);
+        free(der2);
+    }
+
+    assl_rsa_free(&k);
+    return utest_end();
+}
+
 int main(void) {
     int fails = 0;
     fails += test_asn1_parse();
@@ -247,6 +333,7 @@ int main(void) {
     fails += test_x509_verify_self();
     fails += test_x509_fingerprint();
     fails += test_x509_generate();
+    fails += test_x509_generate_san();
     if (fails == 0) printf("ALL X509 TESTS PASSED\n");
     return fails;
 }

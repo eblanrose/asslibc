@@ -1071,6 +1071,106 @@ static int der_build_validity(der_buf *b, const assl_x509_validity *v) {
     return 0;
 }
 
+#define ASN1_GN_DNS  0x82   /* [2] dNSName     IA5String */
+#define ASN1_GN_IP   0x87   /* [7] iPAddress   OCTET STRING */
+
+static int der_write_general_name(der_buf *b, const char *name) {
+    if (!name || !*name) return -1;
+    uint8_t ip[16];
+    size_t iplen = 0;
+    if (inet_pton(AF_INET, name, ip) == 1) iplen = 4;
+    else if (inet_pton(AF_INET6, name, ip) == 1) iplen = 16;
+    if (iplen) {
+        der_write_tag_len(b, ASN1_GN_IP, iplen);
+        return der_write(b, ip, iplen);
+    }
+    size_t n = strlen(name);
+    if (n > 255) return -1;
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)name[i] > 0x7f) return -1;
+    der_write_tag_len(b, ASN1_GN_DNS, n);
+    return der_write(b, name, n);
+}
+
+static int der_build_san(der_buf *value, const assl_x509_params *params) {
+    der_buf names;
+    if (der_init(&names, 64)) return -1;
+    for (size_t i = 0; i < params->san_name_count; i++) {
+        if (der_write_general_name(&names, params->san_names[i])) {
+            free(names.buf);
+            return -1;
+        }
+    }
+    der_write_tag_len(value, ASN1_TAG_SEQUENCE, names.len);
+    int r = der_write(value, names.buf, names.len);
+    free(names.buf);
+    return r;
+}
+
+static int der_append_extension(der_buf *exts, const uint32_t *oid, size_t oidlen,
+                                int critical, const der_buf *value) {
+    der_buf entry;
+    if (der_init(&entry, value->len + 32)) return -1;
+    if (der_write_oid(&entry, oid, oidlen)) { free(entry.buf); return -1; }
+    if (critical) {
+        der_write_tag_len(&entry, ASN1_TAG_BOOLEAN, 1);
+        der_write_u8(&entry, 0xFF);
+    }
+    der_write_tag_len(&entry, ASN1_TAG_OCTET_STRING, value->len);
+    if (der_write(&entry, value->buf, value->len)) { free(entry.buf); return -1; }
+    der_write_tag_len(exts, ASN1_TAG_SEQUENCE, entry.len);
+    int r = der_write(exts, entry.buf, entry.len);
+    free(entry.buf);
+    return r;
+}
+
+static int der_build_extensions_ctx(der_buf *out_ctx, const assl_x509_params *params) {
+    der_buf exts;
+    if (der_init(&exts, 128)) return -1;
+
+    int have_subject = (params->subject_attrs && params->subject_attr_count > 0);
+
+    der_buf bc;
+    if (der_init(&bc, 32)) { free(exts.buf); return -1; }
+    {
+        der_buf bc_seq;
+        if (der_init(&bc_seq, 32)) { free(bc.buf); free(exts.buf); return -1; }
+        der_write_tag_len(&bc_seq, ASN1_TAG_BOOLEAN, 1);
+        der_write_u8(&bc_seq, params->is_ca ? 0xFF : 0x00);
+        if (params->is_ca) der_write_integer_u32(&bc_seq, 0);
+        der_write_tag_len(&bc, ASN1_TAG_SEQUENCE, bc_seq.len);
+        der_write(&bc, bc_seq.buf, bc_seq.len);
+        free(bc_seq.buf);
+    }
+    if (der_append_extension(&exts, oid_basic_constraints, 4, params->is_ca, &bc)) {
+        free(bc.buf); free(exts.buf); return -1;
+    }
+    free(bc.buf);
+
+    if (params->san_names && params->san_name_count > 0) {
+        der_buf san;
+        if (der_init(&san, 64)) { free(exts.buf); return -1; }
+        if (der_build_san(&san, params)) { free(san.buf); free(exts.buf); return -1; }
+        int san_crit = params->san_critical || !have_subject;
+        if (der_append_extension(&exts, oid_subject_alt_name, 4, san_crit, &san)) {
+            free(san.buf); free(exts.buf); return -1;
+        }
+        free(san.buf);
+    }
+
+    {
+        der_buf exts_seq;
+        if (der_init(&exts_seq, exts.len + 8)) { free(exts.buf); return -1; }
+        der_write_tag_len(&exts_seq, ASN1_TAG_SEQUENCE, exts.len);
+        der_write(&exts_seq, exts.buf, exts.len);
+        free(exts.buf);
+        der_write_tag_len(out_ctx, ASN1_TAG_CTX3, exts_seq.len);
+        int r = der_write(out_ctx, exts_seq.buf, exts_seq.len);
+        free(exts_seq.buf);
+        return r;
+    }
+}
+
 static int der_build_tbs(der_buf *b, const assl_x509_params *params,
                          const uint8_t *tbs_hash, size_t tbs_hash_len) {
     (void)tbs_hash; (void)tbs_hash_len;
@@ -1122,44 +1222,11 @@ static int der_build_tbs(der_buf *b, const assl_x509_params *params,
     if (der_init(&spki_buf, 1024)) { free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
     der_build_spki(&spki_buf, params->subject_key);
 
-    der_buf exts_buf;
-    if (der_init(&exts_buf, 128)) { free(spki_buf.buf); free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
-
-    der_buf bc_val;
-    if (der_init(&bc_val, 32)) { free(exts_buf.buf); free(spki_buf.buf); free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
-    der_buf bc_seq;
-    if (der_init(&bc_seq, 32)) { free(bc_val.buf); free(exts_buf.buf); free(spki_buf.buf); free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
-    der_write_tag_len(&bc_seq, 0x01, 1);
-    der_write_u8(&bc_seq, params->is_ca ? 0xFF : 0x00);
-    if (params->is_ca) {
-        der_write_integer_u32(&bc_seq, 0);
-    }
-
-    der_write_tag_len(&bc_val, ASN1_TAG_SEQUENCE, bc_seq.len);
-    der_write(&bc_val, bc_seq.buf, bc_seq.len);
-    free(bc_seq.buf);
-
-    der_buf ext_entry;
-    if (der_init(&ext_entry, 64)) { free(bc_val.buf); free(exts_buf.buf); free(spki_buf.buf); free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
-    der_buf ext_fields;
-    if (der_init(&ext_fields, 64)) { free(ext_entry.buf); free(bc_val.buf); free(exts_buf.buf); free(spki_buf.buf); free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
-    der_write_oid(&ext_fields, oid_basic_constraints, 4);
-    der_write_tag_len(&ext_fields, ASN1_TAG_OCTET_STRING, bc_val.len);
-    der_write(&ext_fields, bc_val.buf, bc_val.len);
-    free(bc_val.buf);
-    der_write_tag_len(&ext_entry, ASN1_TAG_SEQUENCE, ext_fields.len);
-    der_write(&ext_entry, ext_fields.buf, ext_fields.len);
-    free(ext_fields.buf);
-
-    der_write_tag_len(&exts_buf, ASN1_TAG_SEQUENCE, ext_entry.len);
-    der_write(&exts_buf, ext_entry.buf, ext_entry.len);
-    free(ext_entry.buf);
-
     der_buf exts_ctx;
-    if (der_init(&exts_ctx, exts_buf.len + 8)) { free(exts_buf.buf); free(spki_buf.buf); free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
-    der_write_tag_len(&exts_ctx, ASN1_TAG_CTX3, exts_buf.len);
-    der_write(&exts_ctx, exts_buf.buf, exts_buf.len);
-    free(exts_buf.buf);
+    if (der_init(&exts_ctx, 256)) { free(spki_buf.buf); free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1; }
+    if (der_build_extensions_ctx(&exts_ctx, params)) {
+        free(exts_ctx.buf); free(spki_buf.buf); free(subject_seq.buf); free(validity_buf.buf); free(issuer_seq.buf); free(sigalgo_buf.buf); free(serial_buf.buf); free(ver_ctx.buf); return -1;
+    }
 
     size_t total = ver_ctx.len + serial_buf.len + sigalgo_buf.len +
                    issuer_seq.len + validity_buf.len + subject_seq.len +
@@ -1188,7 +1255,9 @@ static int der_build_tbs(der_buf *b, const assl_x509_params *params,
 int assl_x509_generate(const assl_x509_params *params,
                        uint8_t **out_der, size_t *out_len) {
     if (!params || !out_der || !out_len) return -1;
-    if (!params->subject_attrs || params->subject_attr_count == 0) return -1;
+    int have_subject = (params->subject_attrs && params->subject_attr_count > 0);
+    int have_san = (params->san_names && params->san_name_count > 0);
+    if (!have_subject && !have_san) return -1;
     if (!params->subject_key) return -1;
     if (!params->serial || params->serial_len == 0) return -1;
 

@@ -184,8 +184,9 @@ typedef struct {
 
     assl_sha1_ctx hs_digest;
     assl_md5_ctx hs_md5_digest;
-    uint8_t hs_messages[16384];  
+    uint8_t *hs_messages;
     size_t hs_messages_len;
+    size_t hs_messages_cap;
 
     assl_sha256_ctx hs_sha256_digest;
     int hs_sha256_active;

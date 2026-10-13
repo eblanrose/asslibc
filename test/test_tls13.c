@@ -280,6 +280,182 @@ static int test_tls13_init(void) {
     return utest_end();
 }
 
+typedef struct {
+    int fd;
+    const uint8_t *der;
+    size_t der_len;
+    assl_rsa_key *key;
+    int result;
+} selfsigned_arg;
+
+static void *selfsigned_server_thread(void *arg) {
+    selfsigned_arg *a = arg;
+    assl_ssl ssl;
+    assl_ssl_init(&ssl, 0);
+    assl_ssl_set_verify(&ssl, 0, NULL);
+    assl_ssl_set_version(&ssl, TLS13_VERSION);
+    assl_ssl_set_cert(&ssl, a->der, a->der_len, a->key);
+    a->result = assl_ssl_handshake(&ssl, a->fd, a->fd);
+    if (a->result == 0) {
+        char buf[64];
+        int n = assl_ssl_read(&ssl, a->fd, buf, sizeof buf);
+        if (n > 0) assl_ssl_write(&ssl, a->fd, buf, n);
+    }
+    assl_ssl_free(&ssl);
+    close(a->fd);
+    return NULL;
+}
+
+static int test_tls13_selfsigned_verify(void) {
+    utest_begin("tls13-selfsigned-verify");
+    assl_rsa_key k;
+    setup_key(&k);
+
+    assl_x509_dn_pair dn[1] = {
+        { ASSL_X509_DN_CN, (const uint8_t *)"example.test", 12 }
+    };
+    static const char *const sans[] = { "example.test", "www.example.test" };
+    uint8_t serial[4] = { 0x01, 0x02, 0x03, 0x04 };
+
+    assl_x509_params p = {0};
+    p.subject_attrs = dn; p.subject_attr_count = 1;
+    p.serial = serial; p.serial_len = sizeof serial;
+    p.validity.not_before.year = 2024; p.validity.not_before.month = 1; p.validity.not_before.day = 1;
+    p.validity.not_after.year = 2034;  p.validity.not_after.month = 12; p.validity.not_after.day = 31;
+    p.subject_key = &k; p.sig_algo = ASSL_X509_SIG_SHA256_RSA; p.is_ca = 0;
+    p.san_names = sans; p.san_name_count = 2;
+
+    uint8_t *der = NULL;
+    size_t der_len = 0;
+    utest_bool(assl_x509_generate_self_signed(&p, &der, &der_len) == 0, "generate_cert");
+    utest_bool(der != NULL && der_len > 0, "der_nonempty");
+
+    if (der) {
+        int sv[2];
+        utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+        selfsigned_arg a = { sv[1], der, der_len, &k, -1 };
+        pthread_t tid;
+        pthread_create(&tid, NULL, selfsigned_server_thread, &a);
+
+        assl_ssl c;
+        assl_ssl_init(&c, 1);
+        assl_ssl_set_version(&c, TLS13_VERSION);
+        utest_bool(assl_ssl_add_trust(&c, der, der_len) == 1, "add_trust");
+        utest_bool(assl_ssl_set_verify(&c, 1, "example.test") == 0, "set_verify");
+
+        int cr = assl_ssl_handshake(&c, sv[0], sv[0]);
+        utest_bool(cr == 0, "verified_handshake");
+        if (cr == 0) {
+            char buf[16];
+            utest_bool(assl_ssl_write(&c, sv[0], "ping", 4) == 4, "write");
+            utest_bool(assl_ssl_read(&c, sv[0], buf, sizeof buf) == 4, "read");
+        }
+        shutdown(sv[0], SHUT_RDWR);
+        pthread_join(tid, NULL);
+        utest_bool(a.result == 0, "server_ok");
+        assl_ssl_free(&c);
+        close(sv[0]);
+
+        int sv2[2];
+        utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv2) == 0, "socketpair2");
+        selfsigned_arg a2 = { sv2[1], der, der_len, &k, -1 };
+        pthread_t tid2;
+        pthread_create(&tid2, NULL, selfsigned_server_thread, &a2);
+
+        assl_ssl c2;
+        assl_ssl_init(&c2, 1);
+        assl_ssl_set_version(&c2, TLS13_VERSION);
+        assl_ssl_add_trust(&c2, der, der_len);
+        assl_ssl_set_verify(&c2, 1, "wrong.test");
+
+        signal(SIGALRM, on_alarm);
+        alarm(5);
+        int cr2 = assl_ssl_handshake(&c2, sv2[0], sv2[0]);
+        alarm(0);
+        utest_bool(cr2 < 0 || g_alarm_fired, "reject_wrong_hostname");
+        shutdown(sv2[0], SHUT_RDWR);
+        pthread_join(tid2, NULL);
+        assl_ssl_free(&c2);
+        close(sv2[0]);
+
+        free(der);
+    }
+
+    assl_rsa_free(&k);
+    return utest_end();
+}
+
+static int test_tls13_large_transcript(void) {
+    utest_begin("tls13-large-transcript");
+    assl_rsa_key k;
+    setup_key(&k);
+
+    enum { NSAN_MAX = 800 };
+    static char names[NSAN_MAX][32];
+    static const char *sans[NSAN_MAX];
+    for (int i = 0; i < NSAN_MAX; i++) {
+        snprintf(names[i], sizeof names[i], "host%04d.example.test", i);
+        sans[i] = names[i];
+    }
+
+    assl_x509_dn_pair dn[1] = {
+        { ASSL_X509_DN_CN, (const uint8_t *)"example.test", 12 }
+    };
+    uint8_t serial[4] = { 0x09, 0x08, 0x07, 0x06 };
+
+    assl_x509_params p = {0};
+    p.subject_attrs = dn; p.subject_attr_count = 1;
+    p.serial = serial; p.serial_len = sizeof serial;
+    p.validity.not_before.year = 2024; p.validity.not_before.month = 1; p.validity.not_before.day = 1;
+    p.validity.not_after.year = 2034;  p.validity.not_after.month = 12; p.validity.not_after.day = 31;
+    p.subject_key = &k; p.sig_algo = ASSL_X509_SIG_SHA256_RSA; p.is_ca = 0;
+    p.san_names = sans;
+
+    uint8_t *der = NULL;
+    size_t der_len = 0;
+    for (int n = 620; n <= NSAN_MAX; n += 1) {
+        p.san_name_count = (size_t)n;
+        if (assl_x509_generate_self_signed(&p, &der, &der_len) != 0) { der = NULL; break; }
+        if (der_len >= 15950 && der_len <= 16371) break;
+        free(der);
+        der = NULL;
+    }
+    utest_bool(der != NULL, "generate_cert");
+    utest_bool(der_len <= 16371, "cert_fits_record");
+    utest_bool(der_len >= 15950, "cert_large_enough");
+
+    if (der) {
+        int sv[2];
+        utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+        selfsigned_arg a = { sv[1], der, der_len, &k, -1 };
+        pthread_t tid;
+        pthread_create(&tid, NULL, selfsigned_server_thread, &a);
+
+        assl_ssl c;
+        assl_ssl_init(&c, 1);
+        assl_ssl_set_version(&c, TLS13_VERSION);
+        assl_ssl_add_trust(&c, der, der_len);
+        assl_ssl_set_verify(&c, 1, "host0003.example.test");
+
+        int cr = assl_ssl_handshake(&c, sv[0], sv[0]);
+        utest_bool(cr == 0, "verified_handshake");
+        if (cr == 0) {
+            char buf[16];
+            utest_bool(assl_ssl_write(&c, sv[0], "ping", 4) == 4, "write");
+            utest_bool(assl_ssl_read(&c, sv[0], buf, sizeof buf) == 4, "read");
+        }
+        shutdown(sv[0], SHUT_RDWR);
+        pthread_join(tid, NULL);
+        utest_bool(a.result == 0, "server_ok");
+        assl_ssl_free(&c);
+        close(sv[0]);
+        free(der);
+    }
+
+    assl_rsa_free(&k);
+    return utest_end();
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     int fails = 0;
@@ -288,6 +464,8 @@ int main(void) {
     fails += test_tls13_init();
     fails += test_tls13_certverify_rejects_wrong_key();
     fails += test_tls13_key_update();
+    fails += test_tls13_selfsigned_verify();
+    fails += test_tls13_large_transcript();
     fails += test_version(TLS13_VERSION, "tls13-handshake");
     if (fails == 0) printf("ALL TLS 1.3 TESTS PASSED\n");
     return fails;

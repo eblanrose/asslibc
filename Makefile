@@ -10,8 +10,8 @@ LIB        = libasslibc.a
 HDRS       = asslibc.h ssl.h x509.h asn1.h
 
 TESTS      = test_hash test_aes test_bn test_rsa test_dh test_ecc test_x509 \
-             test_ssl test_tls13 test_tls12 test_ssl3 test_tls_pipe test_x509_chain \
-             test_verify test_negative test_x509_strict test_x509_crl
+             test_rng test_ssl test_tls13 test_tls12 test_ssl3 test_tls_pipe \
+             test_x509_chain test_verify test_negative test_x509_strict test_x509_crl
 
 TEST_BINS  = $(addprefix $(TEST_DIR)/,$(TESTS))
 

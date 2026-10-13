@@ -54,33 +54,37 @@ static uint32_t rng_generated;
 
 static pthread_mutex_t rng_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void rng_init_from_os(void) {
+static int rng_init_from_os(void) {
     uint8_t seed[ASSL_RNG_KEY_LEN + ASSL_RNG_NONCE_LEN];
-    if (os_entropy(seed, sizeof seed)) return;
-    memcpy(rng_key, seed, ASSL_RNG_KEY_LEN);
-    memcpy(rng_nonce, seed + ASSL_RNG_KEY_LEN, ASSL_RNG_NONCE_LEN);
+    if (os_entropy(seed, sizeof seed)) {
+        rng_secure = 0;
+        return -1;
+    }
+    if (rng_ready) {
+        for (size_t i = 0; i < ASSL_RNG_KEY_LEN; i++) rng_key[i] ^= seed[i];
+        for (size_t i = 0; i < ASSL_RNG_NONCE_LEN; i++) rng_nonce[i] ^= seed[ASSL_RNG_KEY_LEN + i];
+    } else {
+        memcpy(rng_key, seed, ASSL_RNG_KEY_LEN);
+        memcpy(rng_nonce, seed + ASSL_RNG_KEY_LEN, ASSL_RNG_NONCE_LEN);
+    }
+    assl_memzero(seed, sizeof seed);
     rng_counter = 0;
     rng_ready = 1;
     rng_secure = 1;
     rng_generated = 0;
-}
-
-static void rng_reseed_os(void) {
-    uint8_t seed[ASSL_RNG_KEY_LEN + ASSL_RNG_NONCE_LEN];
-    if (os_entropy(seed, sizeof seed)) return;
-    for (size_t i = 0; i < ASSL_RNG_KEY_LEN; i++) rng_key[i] ^= seed[i];
-    for (size_t i = 0; i < ASSL_RNG_NONCE_LEN; i++) rng_nonce[i] ^= seed[ASSL_RNG_KEY_LEN + i];
-    rng_counter = 0;
-    rng_generated = 0;
+    return 0;
 }
 
 static void rng_ensure(void) {
-    if (rng_ready && rng_generated >= ASSL_RNG_RESEED_BYTES) {
-        rng_reseed_os();
-    } else if (!rng_ready) {
+    if (!rng_ready) {
         rng_init_from_os();
+        return;
     }
-    if (!rng_secure && rng_ready && rng_counter >= ASSL_RNG_RESEED_BYTES / ASSL_RNG_BLOCK_LEN)
+    if (!rng_secure) {
+        rng_init_from_os();
+        return;
+    }
+    if (rng_generated >= ASSL_RNG_RESEED_BYTES)
         rng_init_from_os();
 }
 
@@ -105,10 +109,6 @@ int assl_rng_bytes_checked(uint8_t *out, size_t len) {
         return -1;
     }
     while (len) {
-        if (!rng_secure && rng_counter >= ASSL_RNG_RESEED_BYTES / ASSL_RNG_BLOCK_LEN) {
-            rng_init_from_os();
-            if (!rng_secure) { memset(out, 0, len); pthread_mutex_unlock(&rng_lock); return -1; }
-        }
         uint8_t blk[ASSL_RNG_BLOCK_LEN];
         assl_chacha20_block(rng_key, rng_nonce, rng_counter++, blk);
         size_t t = len < ASSL_RNG_BLOCK_LEN ? len : ASSL_RNG_BLOCK_LEN;
@@ -147,6 +147,7 @@ int assl_rng_bytes_nonzero(uint8_t *out, size_t len) {
 
 void assl_rng_seed(uint64_t seed) {
     pthread_mutex_lock(&rng_lock);
+    uint8_t kseed[ASSL_RNG_KEY_LEN + ASSL_RNG_NONCE_LEN];
     uint64_t z = seed + 0x9e3779b97f4a7c15ULL;
     size_t i = 0;
     for (i = 0; i < ASSL_RNG_KEY_LEN; i += 4) {
@@ -155,10 +156,10 @@ void assl_rng_seed(uint64_t seed) {
         x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
         x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
         uint32_t w = (uint32_t)(x ^ (x >> 31));
-        rng_key[i + 0] = (uint8_t)(w >> 24);
-        rng_key[i + 1] = (uint8_t)(w >> 16);
-        rng_key[i + 2] = (uint8_t)(w >> 8);
-        rng_key[i + 3] = (uint8_t)w;
+        kseed[i + 0] = (uint8_t)(w >> 24);
+        kseed[i + 1] = (uint8_t)(w >> 16);
+        kseed[i + 2] = (uint8_t)(w >> 8);
+        kseed[i + 3] = (uint8_t)w;
     }
     for (i = 0; i < ASSL_RNG_NONCE_LEN; i += 4) {
         z += 0x9e3779b97f4a7c15ULL;
@@ -166,14 +167,25 @@ void assl_rng_seed(uint64_t seed) {
         x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
         x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
         uint32_t w = (uint32_t)(x ^ (x >> 31));
-        rng_nonce[i + 0] = (uint8_t)(w >> 24);
-        rng_nonce[i + 1] = (uint8_t)(w >> 16);
-        rng_nonce[i + 2] = (uint8_t)(w >> 8);
-        rng_nonce[i + 3] = (uint8_t)w;
+        kseed[ASSL_RNG_KEY_LEN + i + 0] = (uint8_t)(w >> 24);
+        kseed[ASSL_RNG_KEY_LEN + i + 1] = (uint8_t)(w >> 16);
+        kseed[ASSL_RNG_KEY_LEN + i + 2] = (uint8_t)(w >> 8);
+        kseed[ASSL_RNG_KEY_LEN + i + 3] = (uint8_t)w;
     }
+    if (rng_ready) {
+        for (i = 0; i < ASSL_RNG_KEY_LEN; i++) rng_key[i] ^= kseed[i];
+        for (i = 0; i < ASSL_RNG_NONCE_LEN; i++) rng_nonce[i] ^= kseed[ASSL_RNG_KEY_LEN + i];
+    } else {
+        memcpy(rng_key, kseed, ASSL_RNG_KEY_LEN);
+        memcpy(rng_nonce, kseed + ASSL_RNG_KEY_LEN, ASSL_RNG_NONCE_LEN);
+        rng_ready = 1;
+    }
+    assl_memzero(kseed, sizeof kseed);
     rng_counter = 0;
-    rng_ready = 1;
-    rng_secure = 0;
     rng_generated = 0;
+    /* Immediately (re)establish security from the OS.  If no OS entropy is
+     * available the generator stays un-secure and rng_ensure() keeps retrying,
+     * so a seeded generator never remains permanently insecure. */
+    rng_init_from_os();
     pthread_mutex_unlock(&rng_lock);
 }

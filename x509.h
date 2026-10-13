@@ -130,7 +130,7 @@ typedef struct {
     const uint8_t *der[8];
     size_t len[8];
     size_t count;
-    int strict; 
+    int strict;
 
     const uint8_t *crl_der[8];
     size_t crl_len[8];
@@ -204,6 +204,10 @@ typedef struct {
     assl_x509_sigalgo_t sig_algo;
 
     int is_ca;
+
+    const char *const *san_names;
+    size_t san_name_count;
+    int san_critical;
 } assl_x509_params;
 
 int assl_x509_generate(const assl_x509_params *params,

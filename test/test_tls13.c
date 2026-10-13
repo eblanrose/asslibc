@@ -63,6 +63,7 @@ static void *server_thread(void *arg) {
         int n = assl_ssl_read(&ssl, ta->fd, buf, sizeof buf);
         if (n > 0) assl_ssl_write(&ssl, ta->fd, buf, n);
     }
+    assl_ssl_free(&ssl);
     close(ta->fd);
     return NULL;
 }
@@ -135,6 +136,7 @@ static void *rogue_server_thread(void *arg) {
         char buf[64];
         assl_ssl_read(&ssl, ta->fd, buf, sizeof buf);
     }
+    assl_ssl_free(&ssl);
     close(ta->fd);
     return NULL;
 }
@@ -195,6 +197,7 @@ static void *ku_server_thread(void *arg) {
             assl_ssl_write(&ssl, ta->fd, "after-update", 12);
         }
     }
+    assl_ssl_free(&ssl);
     close(ta->fd);
     return NULL;
 }

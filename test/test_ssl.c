@@ -62,6 +62,7 @@ static void *server_thread(void *arg) {
             assl_ssl_write(&ssl, ta->fd, buf, n);
         }
     }
+    assl_ssl_free(&ssl);
     close(ta->fd);
     return NULL;
 }

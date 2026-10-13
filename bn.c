@@ -62,7 +62,10 @@ void assl_bn_init(assl_bn *a) {
 }
 
 void assl_bn_free(assl_bn *a) {
-    free(a->d);
+    if (a->d) {
+        assl_memzero(a->d, a->cap * sizeof(uint32_t));
+        free(a->d);
+    }
     assl_bn_init(a);
 }
 

@@ -773,10 +773,10 @@ void assl_poly1305_mac(const uint8_t key[32], const uint8_t *msg, size_t msglen,
     }
 }
 
-static void assl_chacha20_poly1305_tag(const uint8_t polykey[32],
-                                       const uint8_t *aad, size_t aadlen,
-                                       const uint8_t *ct, size_t ctlen,
-                                       uint8_t tag[16]) {
+static int assl_chacha20_poly1305_tag(const uint8_t polykey[32],
+                                      const uint8_t *aad, size_t aadlen,
+                                      const uint8_t *ct, size_t ctlen,
+                                      uint8_t tag[16]) {
     uint8_t *macdata;
     size_t maclen = aadlen + ((16 - (aadlen % 16)) % 16) + ctlen +
                     ((16 - (ctlen % 16)) % 16) + 16;
@@ -784,6 +784,7 @@ static void assl_chacha20_poly1305_tag(const uint8_t polykey[32],
     uint8_t lenblk[16];
 
     macdata = malloc(maclen);
+    if (!macdata) return -1;
     if (aadlen) memcpy(macdata + n, aad, aadlen);
     n += aadlen;
     while (n % 16) macdata[n++] = 0;
@@ -795,7 +796,9 @@ static void assl_chacha20_poly1305_tag(const uint8_t polykey[32],
     memcpy(macdata + n, lenblk, 16);
     n += 16;
     assl_poly1305_mac(polykey, macdata, n, tag);
+    assl_memzero(macdata, maclen);
     free(macdata);
+    return 0;
 }
 
 void assl_chacha20_poly1305_seal(const uint8_t key[32], const uint8_t nonce[12],
@@ -807,9 +810,11 @@ void assl_chacha20_poly1305_seal(const uint8_t key[32], const uint8_t nonce[12],
     assl_chacha20_block(key, nonce, 0, polykey);
     if (ct) {
         assl_chacha_xor(key, nonce, 1, pt, ptlen, ct);
-        assl_chacha20_poly1305_tag(polykey, aad, aadlen, ct, ptlen, tag);
+        if (assl_chacha20_poly1305_tag(polykey, aad, aadlen, ct, ptlen, tag) < 0)
+            assl_memzero(tag, 16);
     } else {
-        assl_chacha20_poly1305_tag(polykey, aad, aadlen, NULL, 0, tag);
+        if (assl_chacha20_poly1305_tag(polykey, aad, aadlen, NULL, 0, tag) < 0)
+            assl_memzero(tag, 16);
     }
 }
 
@@ -822,7 +827,7 @@ int assl_chacha20_poly1305_open(const uint8_t key[32], const uint8_t nonce[12],
     uint32_t bad = 0;
 
     assl_chacha20_block(key, nonce, 0, polykey);
-    assl_chacha20_poly1305_tag(polykey, aad, aadlen, ct, ctlen, t);
+    if (assl_chacha20_poly1305_tag(polykey, aad, aadlen, ct, ctlen, t) < 0) return -1;
     for (size_t i = 0; i < 16; i++) bad |= t[i] ^ tag[i];
     if (bad) return -1;
     assl_chacha_xor(key, nonce, 1, ct, ctlen, pt);

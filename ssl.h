@@ -247,6 +247,8 @@ typedef struct {
 
 void assl_ssl_init(assl_ssl *ssl, int is_client);
 
+void assl_ssl_free(assl_ssl *ssl);
+
 void assl_ssl_set_version(assl_ssl *ssl, uint16_t version);
 
 void assl_ssl_set_cert(assl_ssl *ssl, const uint8_t *der, size_t der_len,

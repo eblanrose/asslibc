@@ -1,4 +1,5 @@
 #include "x509.h"
+#include <arpa/inet.h>
 
 static const uint32_t oid_sha1_rsa[]      = {1, 2, 840, 113549, 1, 1, 5};
 static const uint32_t oid_sha256_rsa[]    = {1, 2, 840, 113549, 1, 1, 11};
@@ -51,7 +52,10 @@ static int parse_time(const asn1_node *n, assl_x509_time *t) {
     const char *s = (const char *)n->value;
     size_t len = n->len;
     memset(t, 0, sizeof *t);
-    if (len < 13 || s[len-1] != 'Z') return -1;
+    size_t min_len = (n->tag == ASN1_TAG_GENERALIZED) ? 15 : 13;
+    if (len < min_len || s[len-1] != 'Z') return -1;
+    for (size_t i = 0; i + 1 < len; i++)
+        if (s[i] < '0' || s[i] > '9') return -1;
     const char *p;
     if (n->tag == ASN1_TAG_UTCTIME) {
         t->year = (s[0]-'0')*10 + (s[1]-'0');
@@ -204,9 +208,9 @@ static void parse_key_usage(const asn1_node *ext_value, assl_x509_cert *cert) {
     int bits = 0;
     for (size_t i = 1; i < bs.len && i <= 2; i++) {
         for (int bit = 0; bit < 8; bit++) {
-            if (i == bs.len - 1 && 8 - bit <= unused) break;
+            if (i == bs.len - 1 && (unsigned)(8 - bit) <= unused) break;
             if (bs.value[i] & (0x80 >> bit))
-                bits |= 1u << ((int)i - 1) * 8 + bit;
+                bits |= 1u << (((int)i - 1) * 8 + bit);
         }
     }
     cert->key_usage = bits;
@@ -610,6 +614,9 @@ int assl_x509_time_in_validity(const assl_x509_cert *cert, int64_t now) {
 
 static int dns_label_match(const char *pattern, size_t plen, const char *host, size_t hlen) {
     if (plen >= 2 && pattern[0] == '*' && pattern[1] == '.') {
+        int dots = 0;
+        for (size_t i = 1; i < plen; i++) if (pattern[i] == '.') dots++;
+        if (dots < 2) return 0;
         const char *dot = (const char *)memchr(host, '.', hlen);
         if (!dot) return 0;
         size_t right_host = hlen - (size_t)(dot - host);
@@ -620,10 +627,27 @@ static int dns_label_match(const char *pattern, size_t plen, const char *host, s
     return strncasecmp(pattern, host, hlen) == 0;
 }
 
+static int parse_ip_literal(const char *host, uint8_t out[16], size_t *outlen) {
+    if (inet_pton(AF_INET, host, out) == 1) { *outlen = 4; return 1; }
+    if (inet_pton(AF_INET6, host, out) == 1) { *outlen = 16; return 1; }
+    return 0;
+}
+
 int assl_x509_check_hostname(const assl_x509_cert *cert, const char *hostname) {
     if (!cert || !hostname || !*hostname) return -1;
     size_t hlen = strlen(hostname);
     if (hlen > 255) return -1;
+
+    uint8_t ip[16];
+    size_t iplen = 0;
+    if (parse_ip_literal(hostname, ip, &iplen)) {
+        for (size_t i = 0; i < cert->san_ip_count; i++) {
+            if (cert->san_ip_len[i] == iplen &&
+                assl_ct_eq(cert->san_ip[i], ip, iplen))
+                return 0;
+        }
+        return -1;
+    }
 
     if (cert->has_san) {
         for (size_t i = 0; i < cert->san_dns_count; i++) {

@@ -1,7 +1,11 @@
 *
+!*/
 !*.c
 !*.h
+!*.sh
 !*.md
 !*.txt
 !Makefile
 *.o
+*.a
+*.der

@@ -458,47 +458,16 @@ static void h_sha384_final(void *c, void *o)                 { assl_sha384_final
 static void h_sha512_init(void *c)                           { assl_sha512_init((assl_sha512_ctx *)c); }
 static void h_sha512_final(void *c, void *o)                 { assl_sha512_final((assl_sha512_ctx *)c, (uint8_t *)o); }
 
-static assl_hash_ops assl_hash_ops_table[ASSL_H_COUNT];
-static int assl_hash_ops_ready;
-
-static void assl_hash_ops_ensure(void) {
-    if (assl_hash_ops_ready) return;
-    assl_hash_ops_table[ASSL_H_MD5].init = h_md5_init;
-    assl_hash_ops_table[ASSL_H_MD5].update = h_md5_update;
-    assl_hash_ops_table[ASSL_H_MD5].final = h_md5_final;
-    assl_hash_ops_table[ASSL_H_MD5].block_size = 64;
-    assl_hash_ops_table[ASSL_H_MD5].out_size = 16;
-
-    assl_hash_ops_table[ASSL_H_SHA1].init = h_sha1_init;
-    assl_hash_ops_table[ASSL_H_SHA1].update = h_sha1_update;
-    assl_hash_ops_table[ASSL_H_SHA1].final = h_sha1_final;
-    assl_hash_ops_table[ASSL_H_SHA1].block_size = 64;
-    assl_hash_ops_table[ASSL_H_SHA1].out_size = 20;
-
-    assl_hash_ops_table[ASSL_H_SHA256].init = h_sha256_init;
-    assl_hash_ops_table[ASSL_H_SHA256].update = h_sha256_update;
-    assl_hash_ops_table[ASSL_H_SHA256].final = h_sha256_final;
-    assl_hash_ops_table[ASSL_H_SHA256].block_size = 64;
-    assl_hash_ops_table[ASSL_H_SHA256].out_size = 32;
-
-    assl_hash_ops_table[ASSL_H_SHA384].init = h_sha384_init;
-    assl_hash_ops_table[ASSL_H_SHA384].update = h_sha512_update;
-    assl_hash_ops_table[ASSL_H_SHA384].final = h_sha384_final;
-    assl_hash_ops_table[ASSL_H_SHA384].block_size = 128;
-    assl_hash_ops_table[ASSL_H_SHA384].out_size = 48;
-
-    assl_hash_ops_table[ASSL_H_SHA512].init = h_sha512_init;
-    assl_hash_ops_table[ASSL_H_SHA512].update = h_sha512_update;
-    assl_hash_ops_table[ASSL_H_SHA512].final = h_sha512_final;
-    assl_hash_ops_table[ASSL_H_SHA512].block_size = 128;
-    assl_hash_ops_table[ASSL_H_SHA512].out_size = 64;
-
-    assl_hash_ops_ready = 1;
-}
+static const assl_hash_ops assl_hash_ops_table[ASSL_H_COUNT] = {
+    [ASSL_H_MD5]    = { 64,  16, h_md5_init,    h_md5_update,    h_md5_final    },
+    [ASSL_H_SHA1]   = { 64,  20, h_sha1_init,   h_sha1_update,   h_sha1_final   },
+    [ASSL_H_SHA256] = { 64,  32, h_sha256_init, h_sha256_update, h_sha256_final },
+    [ASSL_H_SHA384] = { 128, 48, h_sha384_init, h_sha512_update, h_sha384_final },
+    [ASSL_H_SHA512] = { 128, 64, h_sha512_init, h_sha512_update, h_sha512_final },
+};
 
 const assl_hash_ops *assl_hash_ops_of(assl_hash_t h) {
     if ((int)h < 0 || (int)h >= ASSL_H_COUNT) return NULL;
-    assl_hash_ops_ensure();
     return &assl_hash_ops_table[(int)h];
 }
 
@@ -605,12 +574,23 @@ void assl_tls_prf_md5sha1(const void *secret, size_t secretlen,
                           uint8_t *out, size_t outlen) {
     const uint8_t *s = secret;
     size_t half = secretlen / 2;
-    uint8_t *outmd5 = malloc(outlen);
-    uint8_t *outsha = malloc(outlen);
-
-    assl_p_hash(ASSL_H_MD5, s, half, seed, seedlen, outmd5, outlen);
-    assl_p_hash(ASSL_H_SHA1, s + secretlen - half, half, seed, seedlen, outsha, outlen);
-    for (size_t i = 0; i < outlen; i++) out[i] = outmd5[i] ^ outsha[i];
+    if (outlen == 0) return;
+    uint8_t *outmd5 = calloc(1, outlen);
+    uint8_t *outsha = calloc(1, outlen);
+    if (!outmd5 || !outsha) {
+        free(outmd5); free(outsha);
+        assl_memzero(out, outlen);
+        return;
+    }
+    size_t a = assl_p_hash(ASSL_H_MD5, s, half, seed, seedlen, outmd5, outlen);
+    size_t b = assl_p_hash(ASSL_H_SHA1, s + secretlen - half, half, seed, seedlen, outsha, outlen);
+    if (a < outlen || b < outlen) {
+        assl_memzero(out, outlen);
+    } else {
+        for (size_t i = 0; i < outlen; i++) out[i] = outmd5[i] ^ outsha[i];
+    }
+    assl_memzero(outmd5, outlen);
+    assl_memzero(outsha, outlen);
     free(outmd5);
     free(outsha);
 }
@@ -619,10 +599,14 @@ void assl_tls_prf12(const void *secret, size_t secretlen,
                     const char *label, const uint8_t *seed, size_t seedlen,
                     uint8_t *out, size_t outlen) {
     size_t labelen = strlen(label);
+    if (outlen == 0) return;
     uint8_t *combined = malloc(labelen + seedlen);
+    if (!combined) { assl_memzero(out, outlen); return; }
     memcpy(combined, label, labelen);
     memcpy(combined + labelen, seed, seedlen);
-    assl_p_hash(ASSL_H_SHA256, secret, secretlen, combined, labelen + seedlen, out, outlen);
+    if (assl_p_hash(ASSL_H_SHA256, secret, secretlen, combined, labelen + seedlen, out, outlen) < outlen)
+        assl_memzero(out, outlen);
+    assl_memzero(combined, labelen + seedlen);
     free(combined);
 }
 
@@ -648,7 +632,7 @@ void assl_hkdf_expand(assl_hash_t h, const void *prk, size_t prklen,
     uint8_t *block = malloc(hlen + infolen + 1);
     uint8_t counter = 1;
 
-    if (!block) return;
+    if (!block) { assl_memzero(out, outlen); return; }
     while (pos < outlen) {
         size_t n = 0;
         if (tlen) {

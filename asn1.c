@@ -62,6 +62,7 @@ int asn1_read_int(const asn1_node *n, uint8_t *buf, size_t buflen) {
 
 int asn1_read_oid(const asn1_node *n, uint32_t *oids, size_t max_oids) {
     if (!n || n->tag != ASN1_TAG_OID || !oids) return -1;
+    if (max_oids < 2) return -1;
     const uint8_t *p = n->value;
     const uint8_t *end = n->value + n->len;
     size_t count = 0;

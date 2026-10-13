@@ -1,4 +1,5 @@
 #include "asslibc.h"
+#include <pthread.h>
 
 static const char *P256_P  = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff";
 static const char *P256_N  = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
@@ -7,7 +8,8 @@ static const char *P256_GY = "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececb
 static const char *P256_B  = "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b";
 
 static assl_bn P, N, GX, GY, B;
-static int p256_ready = 0;
+static pthread_once_t p256_once = PTHREAD_ONCE_INIT;
+static int p256_ok = 0;
 
 typedef assl_bn fe;
 typedef struct { fe x, y, z; } jac;
@@ -19,16 +21,19 @@ static int jac_copy(jac *r, const jac *a);
 static int jac_to_affine(jac *a, fe *x, fe *y);
 static int jac_mul(jac *r, const assl_bn *k, const jac *p);
 
-static int p256_init(void) {
-    if (p256_ready) return 0;
+static void p256_do_init(void) {
     assl_bn_init(&P); assl_bn_init(&N); assl_bn_init(&GX); assl_bn_init(&GY); assl_bn_init(&B);
-    if (assl_bn_from_hex(&P, P256_P)) return -1;
-    if (assl_bn_from_hex(&N, P256_N)) return -1;
-    if (assl_bn_from_hex(&GX, P256_GX)) return -1;
-    if (assl_bn_from_hex(&GY, P256_GY)) return -1;
-    if (assl_bn_from_hex(&B, P256_B)) return -1;
-    p256_ready = 1;
-    return 0;
+    if (assl_bn_from_hex(&P, P256_P)) return;
+    if (assl_bn_from_hex(&N, P256_N)) return;
+    if (assl_bn_from_hex(&GX, P256_GX)) return;
+    if (assl_bn_from_hex(&GY, P256_GY)) return;
+    if (assl_bn_from_hex(&B, P256_B)) return;
+    p256_ok = 1;
+}
+
+static int p256_init(void) {
+    pthread_once(&p256_once, p256_do_init);
+    return p256_ok ? 0 : -1;
 }
 
 int assl_p256_init(void) { return p256_init(); }
@@ -75,7 +80,7 @@ static int fe_inv(fe *r, const fe *a) {
     assl_bn_init(&two); assl_bn_init(&e);
     if (assl_bn_set_u32(&two, 2)) goto out;
     if (assl_bn_sub(&P, &two, &e)) goto out;
-    if (assl_bn_modpow(a, &e, &P, r)) goto out;
+    if (assl_bn_modpow_ct(a, &e, &P, r)) goto out;
     rv = 0;
 out:
     assl_bn_free(&two); assl_bn_free(&e);
@@ -241,9 +246,10 @@ out:
 
 
 int assl_p256_point_mul(const uint8_t k[32], const uint8_t pt[64], uint8_t out[64]) {
-    p256_init();
+    if (p256_init()) return -1;
     assl_bn kb; jac q, r; fe x, y;
     int rv = -1;
+    if (assl_p256_on_curve(pt) != 1) return -1;
     assl_bn_init(&kb); assl_bn_init(&q.x); assl_bn_init(&q.y); assl_bn_init(&q.z);
     assl_bn_init(&r.x); assl_bn_init(&r.y); assl_bn_init(&r.z);
     assl_bn_init(&x); assl_bn_init(&y);
@@ -262,7 +268,7 @@ out:
 }
 
 int assl_p256_mul_base(const uint8_t k[32], uint8_t out[64]) {
-    p256_init();
+    if (p256_init()) return -1;
     assl_bn kb; jac g, r; fe x, y;
     int rv = -1;
     assl_bn_init(&kb); assl_bn_init(&g.x); assl_bn_init(&g.y); assl_bn_init(&g.z);
@@ -281,7 +287,7 @@ out:
 }
 
 int assl_p256_add_pt(const uint8_t a[64], const uint8_t b[64], uint8_t out[64]) {
-    p256_init();
+    if (p256_init()) return -1;
     jac ja, jb, jr; fe x, y;
     int rv = -1;
     assl_bn_init(&ja.x); assl_bn_init(&ja.y); assl_bn_init(&ja.z);
@@ -306,9 +312,10 @@ out:
 }
 
 int assl_p256_ecdh(const uint8_t priv[32], const uint8_t peer[64], uint8_t out[32]) {
-    p256_init();
+    if (p256_init()) return -1;
     assl_bn kb; jac q, r; fe x, y;
     int rv = -1;
+    if (assl_p256_on_curve(peer) != 1) return -1;
     assl_bn_init(&kb); assl_bn_init(&q.x); assl_bn_init(&q.y); assl_bn_init(&q.z);
     assl_bn_init(&r.x); assl_bn_init(&r.y); assl_bn_init(&r.z);
     assl_bn_init(&x); assl_bn_init(&y);
@@ -391,7 +398,7 @@ static int rfc6979_k(const uint8_t x[32], const uint8_t h1[32], uint8_t k[32]) {
 
 int assl_p256_sign(const uint8_t d[32], const uint8_t digest[32],
                    uint8_t r[32], uint8_t s[32]) {
-    p256_init();
+    if (p256_init()) return -1;
     assl_bn kb, z, rd, rn, sn, kinv, tmp;
     jac G, R;
     fe rx, ry;
@@ -436,7 +443,7 @@ out:
 
 int assl_p256_verify(const uint8_t q[64], const uint8_t digest[32],
                      const uint8_t r[32], const uint8_t s[32]) {
-    p256_init();
+    if (p256_init()) return -1;
     assl_bn rb, sb, w, z, u1, u2, tmp, px;
     jac G, Q, R, add;
     fe rx, ry;
@@ -456,6 +463,7 @@ int assl_p256_verify(const uint8_t q[64], const uint8_t digest[32],
     if (assl_bn_from_bin(&z, digest, 32)) goto out;
     if (assl_bn_mod(&z, &N, &z)) goto out;
     if (jac_g(&G)) goto out;
+    if (assl_p256_on_curve(q) != 1) goto out;
     if (assl_bn_from_bin(&Q.x, q, 32)) goto out;
     if (assl_bn_from_bin(&Q.y, q + 32, 32)) goto out;
     if (assl_bn_set_u32(&Q.z, 1)) goto out;

@@ -116,10 +116,11 @@ int assl_rsa_encrypt(const assl_rsa_key *k, const uint8_t *in, size_t inlen, uin
     if (!em) return -1;
     em[0] = 0x00;
     em[1] = 0x02;
-    if (assl_rng_bytes_nonzero(em + 2, pslen)) { free(em); return -1; }
+    if (assl_rng_bytes_nonzero(em + 2, pslen)) { assl_memzero(em, ksz); free(em); return -1; }
     em[2 + pslen] = 0x00;
     memcpy(em + 3 + pslen, in, inlen);
     int r = assl_rsa_public(k, em, ksz, out);
+    assl_memzero(em, ksz);
     free(em);
     return r;
 }
@@ -178,39 +179,30 @@ int assl_rsa_decrypt(const assl_rsa_key *k, const uint8_t *in, size_t inlen,
         if (outlen) *outlen = 0;
     }
 done:
-    memset(buf, 0, ksz);
+    assl_memzero(buf, ksz);
     free(buf);
     return r;
 }
 
-static const uint8_t *di_prefix[] = {
-    NULL,                          
-    NULL,                          
-    NULL,                          
-    NULL,                          
-    NULL,                          
-};
-static size_t di_len[] = { 0, 0, 0, 0, 0 };
+static const uint8_t di_md5[] = {
+    0x30,0x20,0x30,0x0c,0x06,0x08,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x02,0x05,0x05,0x00,0x04,0x10 };
+static const uint8_t di_sha1[] = {
+    0x30,0x21,0x30,0x09,0x06,0x05,0x2b,0x0e,0x03,0x02,0x1a,0x05,0x00,0x04,0x14 };
+static const uint8_t di_sha256[] = {
+    0x30,0x31,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01,0x05,0x00,0x04,0x20 };
+static const uint8_t di_sha384[] = {
+    0x30,0x41,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02,0x05,0x00,0x04,0x30 };
+static const uint8_t di_sha512[] = {
+    0x30,0x51,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03,0x05,0x00,0x04,0x40 };
 
-static int init_digest_info(void) {
-    static int done = 0;
-    if (done) return 0;
-    static uint8_t md5_di[] = {0x30,0x20,0x30,0x0c,0x06,0x08,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x02,0x05,0x05,0x00,0x04,0x10};
-    static uint8_t sha1_di[] = {0x30,0x21,0x30,0x09,0x06,0x05,0x2b,0x0e,0x03,0x02,0x1a,0x05,0x00,0x04,0x14};
-    static uint8_t sha256_di[] = {0x30,0x31,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01,0x05,0x00,0x04,0x20};
-    static uint8_t sha384_di[] = {0x30,0x41,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02,0x05,0x00,0x04,0x30};
-    static uint8_t sha512_di[] = {0x30,0x51,0x30,0x0d,0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03,0x05,0x00,0x04,0x40};
-    di_prefix[ASSL_H_MD5] = md5_di;   di_len[ASSL_H_MD5] = sizeof md5_di;
-    di_prefix[ASSL_H_SHA1] = sha1_di;  di_len[ASSL_H_SHA1] = sizeof sha1_di;
-    di_prefix[ASSL_H_SHA256] = sha256_di; di_len[ASSL_H_SHA256] = sizeof sha256_di;
-    di_prefix[ASSL_H_SHA384] = sha384_di; di_len[ASSL_H_SHA384] = sizeof sha384_di;
-    di_prefix[ASSL_H_SHA512] = sha512_di; di_len[ASSL_H_SHA512] = sizeof sha512_di;
-    done = 1;
-    return 0;
-}
+static const uint8_t *const di_prefix[ASSL_H_COUNT] = {
+    di_md5, di_sha1, di_sha256, di_sha384, di_sha512
+};
+static const size_t di_len[ASSL_H_COUNT] = {
+    sizeof di_md5, sizeof di_sha1, sizeof di_sha256, sizeof di_sha384, sizeof di_sha512
+};
 
 int assl_rsa_sign(const assl_rsa_key *k, assl_hash_t h, const uint8_t *digest, uint8_t *sig) {
-    init_digest_info();
     size_t ksz = assl_rsa_key_size(k);
     if (!k || !k->have_priv || h >= ASSL_H_COUNT || !digest || !sig) return -1;
     unsigned hlen = assl_hash_size(h);
@@ -240,7 +232,6 @@ done:
 
 int assl_rsa_verify(const assl_rsa_key *k, assl_hash_t h, const uint8_t *digest,
                     const uint8_t *sig, size_t siglen) {
-    init_digest_info();
     size_t ksz = assl_rsa_key_size(k);
     if (!k || h >= ASSL_H_COUNT || !digest || !sig) return -1;
     if (siglen != ksz) return -1;
@@ -276,11 +267,12 @@ done:
     return r;
 }
 
-static void mgf1(assl_hash_t h, const uint8_t *seed, size_t seedlen, size_t len, uint8_t *out) {
+static int mgf1(assl_hash_t h, const uint8_t *seed, size_t seedlen, size_t len, uint8_t *out) {
     size_t blk = assl_hash_size(h);
     uint8_t *inbuf = (uint8_t *)malloc(seedlen + 4);
     size_t pos = 0;
     uint32_t c = 0;
+    if (!inbuf) return -1;
     while (pos < len) {
         memcpy(inbuf, seed, seedlen);
         assl_wr32_be(inbuf + seedlen, c);
@@ -291,58 +283,64 @@ static void mgf1(assl_hash_t h, const uint8_t *seed, size_t seedlen, size_t len,
         pos += n;
         c++;
     }
+    assl_memzero(inbuf, seedlen + 4);
     free(inbuf);
+    return 0;
 }
 
 int assl_rsa_sign_pss(const assl_rsa_key *k, assl_hash_t h, const uint8_t *digest,
                       size_t saltlen, uint8_t *sig) {
     size_t ksz = assl_rsa_key_size(k);
-    if (!k || !k->have_priv || h >= ASSL_H_COUNT) return -1;
+    if (!k || !k->have_priv || h >= ASSL_H_COUNT || !digest || !sig) return -1;
     unsigned hlen = assl_hash_size(h);
     if (hlen == 0 || ksz < hlen + saltlen + 2) return -1;
-    uint8_t *salt = NULL;
+    size_t emLen = ksz;
+    size_t dblen = emLen - hlen - 1;
+    size_t mprime_len = 8 + hlen + saltlen;
+    uint8_t *salt = NULL, *db = NULL, *em = NULL, *mprime = NULL, *H = NULL, *dbmask = NULL;
+    int r = -1;
     if (saltlen > 0) {
         salt = (uint8_t *)malloc(saltlen);
         if (!salt) return -1;
-        if (assl_rng_bytes_checked(salt, saltlen)) { free(salt); return -1; }
+        if (assl_rng_bytes_checked(salt, saltlen)) goto done;
     }
-    size_t emLen = ksz;
-    uint8_t *db = (uint8_t *)malloc(emLen - hlen - 1);
-    uint8_t *em = (uint8_t *)malloc(emLen);
-    if (!db || !em) { free(salt); free(db); free(em); return -1; }
-    size_t mprime_len = 8 + hlen + saltlen;
-    uint8_t *mprime = (uint8_t *)calloc(1, mprime_len);
+    db = (uint8_t *)malloc(dblen);
+    em = (uint8_t *)malloc(emLen);
+    mprime = (uint8_t *)calloc(1, mprime_len);
+    H = (uint8_t *)malloc(hlen);
+    if (!db || !em || !mprime || !H) goto done;
     memcpy(mprime + 8, digest, hlen);
     if (saltlen > 0) memcpy(mprime + 8 + hlen, salt, saltlen);
-    uint8_t *H = (uint8_t *)malloc(hlen);
     assl_hash_one(h, mprime, mprime_len, H);
-    free(mprime);
     size_t pslen = emLen - saltlen - hlen - 2;
     memset(db, 0, pslen);
     db[pslen] = 0x01;
     if (saltlen > 0) memcpy(db + pslen + 1, salt, saltlen);
-    free(salt);
-    uint8_t *dbmask = (uint8_t *)malloc(emLen - hlen - 1);
-    mgf1(h, H, hlen, emLen - hlen - 1, dbmask);
-    for (size_t i = 0; i < emLen - hlen - 1; i++)
+    dbmask = (uint8_t *)malloc(dblen);
+    if (!dbmask) goto done;
+    if (mgf1(h, H, hlen, dblen, dbmask)) goto done;
+    for (size_t i = 0; i < dblen; i++)
         db[i] ^= dbmask[i];
     db[0] &= 0x7f;
-    free(dbmask);
-    memcpy(em, db, emLen - hlen - 1);
-    free(db);
-    memcpy(em + emLen - hlen - 1, H, hlen);
-    free(H);
+    memcpy(em, db, dblen);
+    memcpy(em + dblen, H, hlen);
     em[emLen - 1] = 0xbc;
-    assl_bn m_bn, c_bn;
-    assl_bn_init(&m_bn); assl_bn_init(&c_bn);
-    int r = -1;
-    if (assl_bn_from_bin(&m_bn, em, emLen)) goto done;
-    if (rsa_dp_op(k, &m_bn, &c_bn)) goto done;
-    if (assl_bn_to_bin_ct(&c_bn, sig, ksz)) goto done;
-    r = 0;
+    {
+        assl_bn m_bn, c_bn;
+        assl_bn_init(&m_bn); assl_bn_init(&c_bn);
+        if (assl_bn_from_bin(&m_bn, em, emLen) == 0 &&
+            rsa_dp_op(k, &m_bn, &c_bn) == 0 &&
+            assl_bn_to_bin_ct(&c_bn, sig, ksz) == 0)
+            r = 0;
+        assl_bn_free(&m_bn); assl_bn_free(&c_bn);
+    }
 done:
-    assl_bn_free(&m_bn); assl_bn_free(&c_bn);
-    free(em);
+    if (salt) assl_memzero(salt, saltlen);
+    if (db) assl_memzero(db, dblen);
+    if (em) assl_memzero(em, emLen);
+    if (mprime) assl_memzero(mprime, mprime_len);
+    if (dbmask) assl_memzero(dbmask, dblen);
+    free(salt); free(db); free(em); free(mprime); free(H); free(dbmask);
     return r;
 }
 

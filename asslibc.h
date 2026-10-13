@@ -1,6 +1,13 @@
 #ifndef ASSLIBC_H
 #define ASSLIBC_H
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -12,10 +19,22 @@
 #include <fcntl.h>
 #include <time.h>
 
-#if defined(__linux__)
-#include <sys/random.h>
-#elif defined(__APPLE__)
-#include <sys/random.h>
+#if defined(__has_include)
+#  if __has_include(<sys/random.h>)
+#    include <sys/random.h>
+#    ifndef ASSL_HAVE_GETENTROPY
+#      define ASSL_HAVE_GETENTROPY 1
+#    endif
+#  endif
+#endif
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__) || defined(__DragonFly__)
+#  ifndef ASSL_HAVE_GETENTROPY
+#    define ASSL_HAVE_GETENTROPY 1
+#  endif
+#endif
+#ifndef ASSL_HAVE_GETENTROPY
+#define ASSL_HAVE_GETENTROPY 0
 #endif
 
 #define ASSL_VERSION_SSL30 0x0300
@@ -317,6 +336,21 @@ static inline void assl_wr32_le(uint8_t *p, uint32_t v) {
 static inline void assl_wr64_le(uint8_t *p, uint64_t v) {
     assl_wr32_le(p, (uint32_t)v);
     assl_wr32_le(p + 4, (uint32_t)(v >> 32));
+}
+
+/* Zero a buffer without letting the optimizer elide the stores.  Used to wipe
+ * secrets (keys, master secrets, private bignum limbs) before their storage is
+ * released or reused. */
+static inline void assl_memzero(void *p, size_t n) {
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) *v++ = 0;
+}
+
+static inline int assl_ct_eq(const void *a, const void *b, size_t n) {
+    const uint8_t *x = (const uint8_t *)a, *y = (const uint8_t *)b;
+    uint8_t d = 0;
+    for (size_t i = 0; i < n; i++) d |= (uint8_t)(x[i] ^ y[i]);
+    return d == 0;
 }
 
 #endif

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -14,6 +15,7 @@ static const uint8_t k_alpn[] = {
 };
 
 int main(int argc, char **argv) {
+    signal(SIGPIPE, SIG_IGN);
     if (argc < 4) {
         fprintf(stderr, "usage: %s <host> <port> <tls1.3|tls1.2> [servername]\n", argv[0]);
         return 2;

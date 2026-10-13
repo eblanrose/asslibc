@@ -1,25 +1,22 @@
-#define _GNU_SOURCE
 #include "asslibc.h"
+#include <pthread.h>
 
 /* ---- OS entropy sources ----
- * getrandom(2) on Linux, getentropy(3) on macOS, fallback /dev/urandom.
- * Returns 0 on success, -1 when no OS entropy source is available. */
+ * Uses POSIX getentropy() where available, then falls back to reading
+ * /dev/urandom (and /dev/random as a last resort).  Returns 0 on success,
+ * -1 when no OS entropy source is available. */
 static int os_entropy(uint8_t *out, size_t len) {
-#if defined(__linux__)
+#if ASSL_HAVE_GETENTROPY
     {
         size_t got = 0;
         while (got < len) {
-            ssize_t r = getrandom(out + got, len - got, 0);
-            if (r < 0) {
-                if (errno == EINTR) continue;
-                break;
-            }
-            got += (size_t)r;
+            size_t chunk = len - got;
+            if (chunk > 256) chunk = 256;
+            if (getentropy(out + got, chunk) != 0) break;
+            got += chunk;
         }
         if (got == len) return 0;
     }
-#elif defined(__APPLE__)
-    if (len <= 256 && getentropy(out, len) == 0) return 0;
 #endif
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd < 0) fd = open("/dev/random", O_RDONLY | O_CLOEXEC);
@@ -54,6 +51,8 @@ static uint32_t rng_counter;
 static int      rng_ready;
 static int      rng_secure;      
 static uint32_t rng_generated;   
+
+static pthread_mutex_t rng_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void rng_init_from_os(void) {
     uint8_t seed[ASSL_RNG_KEY_LEN + ASSL_RNG_NONCE_LEN];
@@ -91,16 +90,24 @@ static int rng_usable(void) {
 }
 
 int assl_rng_is_secure(void) {
-    return rng_usable();
+    pthread_mutex_lock(&rng_lock);
+    int s = rng_usable();
+    pthread_mutex_unlock(&rng_lock);
+    return s;
 }
 
 int assl_rng_bytes_checked(uint8_t *out, size_t len) {
     if (!out) return -1;
-    if (!rng_usable()) { memset(out, 0, len); return -1; }
+    pthread_mutex_lock(&rng_lock);
+    if (!rng_usable()) {
+        memset(out, 0, len);
+        pthread_mutex_unlock(&rng_lock);
+        return -1;
+    }
     while (len) {
         if (!rng_secure && rng_counter >= ASSL_RNG_RESEED_BYTES / ASSL_RNG_BLOCK_LEN) {
             rng_init_from_os();
-            if (!rng_secure) { memset(out, 0, len); return -1; }
+            if (!rng_secure) { memset(out, 0, len); pthread_mutex_unlock(&rng_lock); return -1; }
         }
         uint8_t blk[ASSL_RNG_BLOCK_LEN];
         assl_chacha20_block(rng_key, rng_nonce, rng_counter++, blk);
@@ -109,7 +116,9 @@ int assl_rng_bytes_checked(uint8_t *out, size_t len) {
         out += t;
         len -= t;
         rng_generated += (uint32_t)t;
+        assl_memzero(blk, sizeof blk);
     }
+    pthread_mutex_unlock(&rng_lock);
     return 0;
 }
 
@@ -125,7 +134,6 @@ uint64_t assl_rng_next(void) {
 
 int assl_rng_bytes_nonzero(uint8_t *out, size_t len) {
     if (!out) return -1;
-    if (!rng_usable()) { memset(out, 0, len); return -1; }
     uint8_t b;
     while (len) {
         do {
@@ -138,6 +146,7 @@ int assl_rng_bytes_nonzero(uint8_t *out, size_t len) {
 }
 
 void assl_rng_seed(uint64_t seed) {
+    pthread_mutex_lock(&rng_lock);
     uint64_t z = seed + 0x9e3779b97f4a7c15ULL;
     size_t i = 0;
     for (i = 0; i < ASSL_RNG_KEY_LEN; i += 4) {
@@ -166,4 +175,5 @@ void assl_rng_seed(uint64_t seed) {
     rng_ready = 1;
     rng_secure = 0;
     rng_generated = 0;
+    pthread_mutex_unlock(&rng_lock);
 }

@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <pthread.h>
-#include <sys/socket.h>
-#include <signal.h>
+#include "testsocket.h"
 #include "utest.h"
 #include "test_cert.h"
 #include "asslibc.h"
@@ -64,14 +62,14 @@ static void *server_thread(void *arg) {
         if (n > 0) assl_ssl_write(&ssl, ta->fd, buf, n);
     }
     assl_ssl_free(&ssl);
-    close(ta->fd);
+    tst_fd_close(ta->fd);
     return NULL;
 }
 
 static int test_version(uint16_t version, const char *name) {
     utest_begin(name);
     int sv[2];
-    utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+    utest_bool(testsocketpair(sv) == 0, "socketpair");
 
     assl_rsa_key k;
     setup_key(&k);
@@ -100,13 +98,13 @@ static int test_version(uint16_t version, const char *name) {
     pthread_join(tid, NULL);
     utest_bool(ta.result == 0, "server_handshake");
 
-    close(sv[0]);
+    tst_fd_close(sv[0]);
     assl_rsa_free(&k);
     return utest_end();
 }
 
 int main(void) {
-    signal(SIGPIPE, SIG_IGN);
+    tst_ignore_sigpipe();
     int fails = 0;
     fails += test_version(TLS10_VERSION, "tls10-handshake");
     fails += test_version(TLS11_VERSION, "tls11-handshake");

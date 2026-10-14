@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <pthread.h>
-#include <sys/socket.h>
-#include <signal.h>
+#include "testsocket.h"
 #include "utest.h"
 #include "test_cert.h"
 #include "asslibc.h"
@@ -64,14 +62,14 @@ static void *server_thread(void *arg) {
         if (n > 0) assl_ssl_write(&ssl, ta->fd, buf, n);
     }
     assl_ssl_free(&ssl);
-    close(ta->fd);
+    tst_fd_close(ta->fd);
     return NULL;
 }
 
 static int test_version(uint16_t version, const char *name) {
     utest_begin(name);
     int sv[2];
-    utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+    utest_bool(testsocketpair(sv) == 0, "socketpair");
 
     assl_rsa_key k;
     setup_key(&k);
@@ -100,7 +98,7 @@ static int test_version(uint16_t version, const char *name) {
     pthread_join(tid, NULL);
     utest_bool(ta.result == 0, "server_handshake");
 
-    close(sv[0]);
+    tst_fd_close(sv[0]);
     assl_rsa_free(&k);
     return utest_end();
 }
@@ -137,14 +135,14 @@ static void *rogue_server_thread(void *arg) {
         assl_ssl_read(&ssl, ta->fd, buf, sizeof buf);
     }
     assl_ssl_free(&ssl);
-    close(ta->fd);
+    tst_fd_close(ta->fd);
     return NULL;
 }
 
 static int test_tls13_certverify_rejects_wrong_key(void) {
     utest_begin("tls13-certverify-wrong-key");
     int sv[2];
-    utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+    utest_bool(testsocketpair(sv) == 0, "socketpair");
 
     assl_rsa_key k;
     setup_key(&k);
@@ -158,17 +156,16 @@ static int test_tls13_certverify_rejects_wrong_key(void) {
     assl_ssl_set_verify(&client_ssl, 0, NULL);
     assl_ssl_set_version(&client_ssl, TLS13_VERSION);
 
-    signal(SIGALRM, on_alarm);
-    alarm(5);
+    tst_watchdog_arm(on_alarm);
     int cr = assl_ssl_handshake(&client_ssl, sv[0], sv[0]);
-    alarm(0);
+    tst_watchdog_cancel();
     utest_bool(cr < 0 || g_alarm_fired, "client_rejects_bad_certificateverify");
     utest_bool(client_ssl.state != SSL3_STATE_CONNECTED, "client_not_connected");
 
-    shutdown(sv[0], SHUT_RDWR);
-    close(sv[0]);
+    tst_fd_shutdown_rw(sv[0]);
+    tst_fd_close(sv[0]);
     pthread_join(tid, NULL);
-    close(sv[1]);
+    tst_fd_close(sv[1]);
     assl_rsa_free(&k);
     return utest_end();
 }
@@ -198,14 +195,14 @@ static void *ku_server_thread(void *arg) {
         }
     }
     assl_ssl_free(&ssl);
-    close(ta->fd);
+    tst_fd_close(ta->fd);
     return NULL;
 }
 
 static int test_tls13_key_update(void) {
     utest_begin("tls13-key-update");
     int sv[2];
-    utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+    utest_bool(testsocketpair(sv) == 0, "socketpair");
 
     assl_rsa_key k;
     setup_key(&k);
@@ -240,7 +237,7 @@ static int test_tls13_key_update(void) {
     utest_bool(ta.result == 0, "server_handshake");
     utest_bool(ta.update_done == 1, "server_sent_its_key_update");
 
-    close(sv[0]);
+    tst_fd_close(sv[0]);
     assl_rsa_free(&k);
     return utest_end();
 }
@@ -302,7 +299,7 @@ static void *selfsigned_server_thread(void *arg) {
         if (n > 0) assl_ssl_write(&ssl, a->fd, buf, n);
     }
     assl_ssl_free(&ssl);
-    close(a->fd);
+    tst_fd_close(a->fd);
     return NULL;
 }
 
@@ -332,7 +329,7 @@ static int test_tls13_selfsigned_verify(void) {
 
     if (der) {
         int sv[2];
-        utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+        utest_bool(testsocketpair(sv) == 0, "socketpair");
         selfsigned_arg a = { sv[1], der, der_len, &k, -1 };
         pthread_t tid;
         pthread_create(&tid, NULL, selfsigned_server_thread, &a);
@@ -350,14 +347,14 @@ static int test_tls13_selfsigned_verify(void) {
             utest_bool(assl_ssl_write(&c, sv[0], "ping", 4) == 4, "write");
             utest_bool(assl_ssl_read(&c, sv[0], buf, sizeof buf) == 4, "read");
         }
-        shutdown(sv[0], SHUT_RDWR);
+        tst_fd_shutdown_rw(sv[0]);
         pthread_join(tid, NULL);
         utest_bool(a.result == 0, "server_ok");
         assl_ssl_free(&c);
-        close(sv[0]);
+        tst_fd_close(sv[0]);
 
         int sv2[2];
-        utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv2) == 0, "socketpair2");
+        utest_bool(testsocketpair(sv2) == 0, "socketpair2");
         selfsigned_arg a2 = { sv2[1], der, der_len, &k, -1 };
         pthread_t tid2;
         pthread_create(&tid2, NULL, selfsigned_server_thread, &a2);
@@ -368,15 +365,14 @@ static int test_tls13_selfsigned_verify(void) {
         assl_ssl_add_trust(&c2, der, der_len);
         assl_ssl_set_verify(&c2, 1, "wrong.test");
 
-        signal(SIGALRM, on_alarm);
-        alarm(5);
+        tst_watchdog_arm(on_alarm);
         int cr2 = assl_ssl_handshake(&c2, sv2[0], sv2[0]);
-        alarm(0);
+        tst_watchdog_cancel();
         utest_bool(cr2 < 0 || g_alarm_fired, "reject_wrong_hostname");
-        shutdown(sv2[0], SHUT_RDWR);
+        tst_fd_shutdown_rw(sv2[0]);
         pthread_join(tid2, NULL);
         assl_ssl_free(&c2);
-        close(sv2[0]);
+        tst_fd_close(sv2[0]);
 
         free(der);
     }
@@ -426,7 +422,7 @@ static int test_tls13_large_transcript(void) {
 
     if (der) {
         int sv[2];
-        utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+        utest_bool(testsocketpair(sv) == 0, "socketpair");
         selfsigned_arg a = { sv[1], der, der_len, &k, -1 };
         pthread_t tid;
         pthread_create(&tid, NULL, selfsigned_server_thread, &a);
@@ -444,11 +440,11 @@ static int test_tls13_large_transcript(void) {
             utest_bool(assl_ssl_write(&c, sv[0], "ping", 4) == 4, "write");
             utest_bool(assl_ssl_read(&c, sv[0], buf, sizeof buf) == 4, "read");
         }
-        shutdown(sv[0], SHUT_RDWR);
+        tst_fd_shutdown_rw(sv[0]);
         pthread_join(tid, NULL);
         utest_bool(a.result == 0, "server_ok");
         assl_ssl_free(&c);
-        close(sv[0]);
+        tst_fd_close(sv[0]);
         free(der);
     }
 
@@ -457,7 +453,7 @@ static int test_tls13_large_transcript(void) {
 }
 
 int main(void) {
-    signal(SIGPIPE, SIG_IGN);
+    tst_ignore_sigpipe();
     int fails = 0;
     fails += test_tls13_hkdf_label();
     fails += test_tls13_version();

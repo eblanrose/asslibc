@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <pthread.h>
-#include <sys/socket.h>
-#include <signal.h>
+#include "testsocket.h"
 #include "ssl.h"
 
 static uint16_t g_suite;
@@ -15,7 +13,7 @@ static void *rogue_server(void *arg) {
     (void)arg;
     int fd = rogue_fd;
     uint8_t buf[4096];
-    if (read(fd, buf, sizeof buf) <= 5) { close(fd); return NULL; }
+    if (tst_fd_read(fd, buf, sizeof buf) <= 5) { tst_fd_close(fd); return NULL; }
 
     uint8_t sh[128];
     size_t p = 0;
@@ -41,14 +39,14 @@ static void *rogue_server(void *arg) {
     rec[r++] = 2;
     rec[r++] = 0; rec[r++] = (uint8_t)(p >> 8); rec[r++] = (uint8_t)p;
     memcpy(rec + r, sh, p); r += p;
-    (void)!write(fd, rec, r);
-    close(fd);
+    (void)!tst_fd_write(fd, rec, r);
+    tst_fd_close(fd);
     return NULL;
 }
 
 static void run(const char *what, uint16_t suite, int with_sentinel, int tls13, int want_pass) {
     int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { perror("socketpair"); return; }
+    if (testsocketpair(sv) != 0) { perror("socketpair"); return; }
     g_suite = suite; g_with_sentinel = with_sentinel; g_tls13_client = tls13;
     rogue_fd = sv[1];
     pthread_t t;
@@ -60,7 +58,7 @@ static void run(const char *what, uint16_t suite, int with_sentinel, int tls13, 
     (void)assl_ssl_handshake(&ssl, sv[0], sv[0]);
     int passed = (ssl.state == SSL3_STATE_SERVER_HELLO_RECEIVED);
     pthread_join(t, NULL);
-    close(sv[0]);
+    tst_fd_close(sv[0]);
 
     int ok = (passed == want_pass);
     printf("%-52s %-18s expected %-16s %s\n", what,
@@ -71,7 +69,7 @@ static void run(const char *what, uint16_t suite, int with_sentinel, int tls13, 
 }
 
 int main(void) {
-    signal(SIGPIPE, SIG_IGN);
+    tst_ignore_sigpipe();
     run("TLS1.2 client, unoffered suite 0x1301", TLS13_CK_AES_128_GCM_SHA256, 0, 0, 0);
     run("TLS1.2 client, offered suite 0xC02F", TLS12_CK_ECDHE_RSA_WITH_AES_128_GCM_SHA256, 0, 0, 1);
     run("TLS1.3 client, below 1.3, sentinel PRESENT", TLS13_CK_AES_128_GCM_SHA256, 1, 1, 0);

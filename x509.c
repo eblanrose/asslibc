@@ -1,5 +1,126 @@
 #include "x509.h"
-#include <arpa/inet.h>
+
+
+static int ascii_hexval(unsigned char c) {
+    if (c >= '0' && c <= '9') return (int)(c - '0');
+    if (c >= 'a' && c <= 'f') return (int)(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F') return (int)(c - 'A' + 10);
+    return -1;
+}
+
+static int assl_pton4(const char *s, uint8_t out[4]) {
+    unsigned v = 0;
+    int parts = 0, ndig = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    for (;; p++) {
+        if (*p >= '0' && *p <= '9') {
+            if (++ndig > 3) return 0;
+            if (ndig > 1 && v == 0) return 0;
+            v = v * 10 + (unsigned)(*p - '0');
+            if (v > 255) return 0;
+        } else if (*p == '.' || *p == '\0') {
+            if (ndig == 0 || parts >= 4) return 0;
+            out[parts++] = (uint8_t)v;
+            if (*p == '\0') return parts == 4;
+            v = 0;
+            ndig = 0;
+        } else {
+            return 0;
+        }
+    }
+}
+
+static int assl_pton6(const char *s, uint8_t out[16]) {
+    uint16_t g[8];
+    int n = 0, split = -1;
+    const unsigned char *p = (const unsigned char *)s;
+
+    if (p[0] == ':' && p[1] == ':') {
+        split = 0;
+        p += 2;
+        if (!*p) { memset(out, 0, 16); return 1; }
+    } else if (p[0] == ':') {
+        return 0;
+    }
+
+    for (;;) {
+        unsigned v = 0;
+        int nd = 0;
+        while (nd < 4 && ascii_hexval(*p) >= 0) {
+            v = (v << 4) | (unsigned)ascii_hexval(*p);
+            p++;
+            nd++;
+        }
+        if (nd == 0) {
+            if (*p == ':' && p[1] == ':') {
+                if (split >= 0) return 0;
+                split = n;
+                p += 2;
+                if (!*p) break;
+                continue;
+            }
+            return 0;
+        }
+        if (n >= 8) return 0;
+        g[n++] = (uint16_t)v;
+
+        if (*p == '.') {
+            uint8_t a[4];
+            if (!assl_pton4((const char *)p, a)) return 0;
+            if (n == 0) return 0;
+            g[n - 1] = (uint16_t)(((uint16_t)a[0] << 8) | a[1]);
+            if (n >= 8) return 0;
+            g[n++] = (uint16_t)(((uint16_t)a[2] << 8) | a[3]);
+            break;
+        }
+        if (*p == '\0') break;
+        if (*p != ':') return 0;
+        p++;
+        if (*p == ':') {
+            if (split >= 0) return 0;
+            split = n;
+            p += 2;
+            if (!*p) break;
+        }
+    }
+
+    if (split >= 0) {
+        if (n >= 8) return 0;
+    } else if (n != 8) {
+        return 0;
+    }
+
+    memset(out, 0, 16);
+    if (split < 0) {
+        for (int i = 0; i < 8; i++) {
+            out[2 * i]     = (uint8_t)(g[i] >> 8);
+            out[2 * i + 1] = (uint8_t)g[i];
+        }
+    } else {
+        for (int i = 0; i < split; i++) {
+            out[2 * i]     = (uint8_t)(g[i] >> 8);
+            out[2 * i + 1] = (uint8_t)g[i];
+        }
+        int tail = n - split;
+        for (int i = 0; i < tail; i++) {
+            int bi = 8 - tail + i;
+            out[2 * bi]     = (uint8_t)(g[split + i] >> 8);
+            out[2 * bi + 1] = (uint8_t)g[split + i];
+        }
+    }
+    return 1;
+}
+
+static int assl_ascii_ncmp(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + 32);
+        if (ca != cb) return ca < cb ? -1 : 1;
+    }
+    return 0;
+}
 
 static const uint32_t oid_sha1_rsa[]      = {1, 2, 840, 113549, 1, 1, 5};
 static const uint32_t oid_sha256_rsa[]    = {1, 2, 840, 113549, 1, 1, 11};
@@ -621,15 +742,15 @@ static int dns_label_match(const char *pattern, size_t plen, const char *host, s
         if (!dot) return 0;
         size_t right_host = hlen - (size_t)(dot - host);
         return right_host == plen - 1 &&
-               strncasecmp(pattern + 1, dot, plen - 1) == 0;
+               assl_ascii_ncmp(pattern + 1, dot, plen - 1) == 0;
     }
     if (plen != hlen) return 0;
-    return strncasecmp(pattern, host, hlen) == 0;
+    return assl_ascii_ncmp(pattern, host, hlen) == 0;
 }
 
 static int parse_ip_literal(const char *host, uint8_t out[16], size_t *outlen) {
-    if (inet_pton(AF_INET, host, out) == 1) { *outlen = 4; return 1; }
-    if (inet_pton(AF_INET6, host, out) == 1) { *outlen = 16; return 1; }
+    if (assl_pton4(host, out)) { *outlen = 4; return 1; }
+    if (assl_pton6(host, out)) { *outlen = 16; return 1; }
     return 0;
 }
 
@@ -1078,8 +1199,8 @@ static int der_write_general_name(der_buf *b, const char *name) {
     if (!name || !*name) return -1;
     uint8_t ip[16];
     size_t iplen = 0;
-    if (inet_pton(AF_INET, name, ip) == 1) iplen = 4;
-    else if (inet_pton(AF_INET6, name, ip) == 1) iplen = 16;
+    if (assl_pton4(name, ip)) iplen = 4;
+    else if (assl_pton6(name, ip)) iplen = 16;
     if (iplen) {
         der_write_tag_len(b, ASN1_GN_IP, iplen);
         return der_write(b, ip, iplen);

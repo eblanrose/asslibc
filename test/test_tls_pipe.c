@@ -1,8 +1,7 @@
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <pthread.h>
-#include <signal.h>
+#include "testsocket.h"
 #include "utest.h"
 #include "test_cert.h"
 #include "asslibc.h"
@@ -69,8 +68,8 @@ static void *pipe_server_thread(void *arg) {
 static int test_tls_pipe(uint16_t version, const char *name) {
     utest_begin(name);
     int pipe_c2s[2], pipe_s2c[2];
-    utest_bool(pipe(pipe_c2s) == 0, "pipe_c2s");
-    utest_bool(pipe(pipe_s2c) == 0, "pipe_s2c");
+    utest_bool(testsocketpair(pipe_c2s) == 0, "pipe_c2s");
+    utest_bool(testsocketpair(pipe_s2c) == 0, "pipe_s2c");
 
     assl_rsa_key k;
     setup_key(&k);
@@ -101,14 +100,14 @@ static int test_tls_pipe(uint16_t version, const char *name) {
     pthread_join(tid, NULL);
     utest_bool(ta.result == 0, "server_handshake");
 
-    close(pipe_c2s[0]); close(pipe_c2s[1]);
-    close(pipe_s2c[0]); close(pipe_s2c[1]);
+    tst_fd_close(pipe_c2s[0]); tst_fd_close(pipe_c2s[1]);
+    tst_fd_close(pipe_s2c[0]); tst_fd_close(pipe_s2c[1]);
     assl_rsa_free(&k);
     return utest_end();
 }
 
 int main(void) {
-    signal(SIGPIPE, SIG_IGN);
+    tst_ignore_sigpipe();
     int fails = 0;
     fails += test_tls_pipe(SSL3_VERSION, "ssl3-pipe");
     fails += test_tls_pipe(TLS10_VERSION, "tls10-pipe");

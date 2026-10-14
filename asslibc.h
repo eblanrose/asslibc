@@ -11,30 +11,22 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include <strings.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <time.h>
 
-#if defined(__has_include)
-#  if __has_include(<sys/random.h>)
-#    include <sys/random.h>
-#    ifndef ASSL_HAVE_GETENTROPY
-#      define ASSL_HAVE_GETENTROPY 1
-#    endif
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
 #  endif
-#endif
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
-    defined(__NetBSD__) || defined(__DragonFly__)
-#  ifndef ASSL_HAVE_GETENTROPY
-#    define ASSL_HAVE_GETENTROPY 1
-#  endif
-#endif
-#ifndef ASSL_HAVE_GETENTROPY
-#define ASSL_HAVE_GETENTROPY 0
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  include <io.h>
+#else
+#  include <unistd.h>
+#  include <fcntl.h>
+#  include <strings.h>
 #endif
 
 #define ASSL_VERSION_SSL30 0x0300

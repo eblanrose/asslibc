@@ -92,10 +92,15 @@ static int utest_finish(const char *suite) {
 }
 
 static int __attribute__((unused)) utest_need_rng(void) {
+#if defined(_WIN32)
+    (void)0;
+    return 1;
+#else
     FILE *f = fopen("/dev/urandom", "rb");
     int ok = f != NULL;
     if (f) fclose(f);
     return ok;
+#endif
 }
 
 #endif

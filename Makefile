@@ -1,26 +1,34 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -g
 CPPFLAGS ?= -I. -D_DEFAULT_SOURCE
-LDFLAGS ?= -lpthread
+
+MINGW_TARGET := $(findstring mingw,$(shell $(CC) -dumpmachine 2>/dev/null))
+ifneq ($(MINGW_TARGET),)
+    EXE     := .exe
+    LDFLAGS ?= -lws2_32 -lbcrypt -lpthread
+else
+    EXE     :=
+    LDFLAGS ?= -lpthread
+endif
 
 TEST_DIR   = test
 SRC_FILES  = sha.c aes.c bn.c rsa.c rsa_keygen.c dh.c ecc.c asn1.c x509.c rng.c ssl.c
 OBJ_FILES  = $(SRC_FILES:.c=.o)
 LIB        = libasslibc.a
-HDRS       = asslibc.h ssl.h x509.h asn1.h
+HDRS       = asslibc.h assl_io.h ssl.h x509.h asn1.h
 
 TESTS      = test_hash test_aes test_bn test_rsa test_dh test_ecc test_x509 \
              test_rng test_ssl test_tls13 test_tls12 test_ssl3 test_tls_pipe \
              test_x509_chain test_verify test_negative test_x509_strict test_x509_crl
 
-TEST_BINS  = $(addprefix $(TEST_DIR)/,$(TESTS))
+TEST_BINS  = $(addprefix $(TEST_DIR)/,$(addsuffix $(EXE),$(TESTS)))
 
 INTEROP    = interop_server interop_client
-INTEROP_BINS = $(addprefix $(TEST_DIR)/,$(INTEROP))
+INTEROP_BINS = $(addprefix $(TEST_DIR)/,$(addsuffix $(EXE),$(INTEROP)))
 
 FUZZ_DIR   = fuzz
 FUZZERS    = fuzz_bn fuzz_rsa fuzz_x509
-FUZZ_BINS  = $(addprefix $(FUZZ_DIR)/,$(FUZZERS))
+FUZZ_BINS  = $(addprefix $(FUZZ_DIR)/,$(addsuffix $(EXE),$(FUZZERS)))
 FUZZ_CC   ?= clang
 FUZZ_CFLAGS ?= -std=c11 -O1 -g -Wall -Wextra -I.
 
@@ -34,10 +42,10 @@ all: $(TEST_BINS) $(INTEROP_BINS) $(LIB)
 
 lib: $(LIB)
 
-$(TEST_DIR)/%: $(TEST_DIR)/%.c $(SRC_FILES) $(HDRS) $(TEST_DIR)/test_cert.h
+$(TEST_DIR)/%$(EXE): $(TEST_DIR)/%.c $(SRC_FILES) $(HDRS) $(TEST_DIR)/test_cert.h
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(SRC_FILES) $(LDFLAGS)
 
-$(TEST_DIR)/gen_cert: $(TEST_DIR)/gen_cert.c $(SRC_FILES) $(HDRS)
+$(TEST_DIR)/gen_cert$(EXE): $(TEST_DIR)/gen_cert.c $(SRC_FILES) $(HDRS)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< $(SRC_FILES) $(LDFLAGS)
 
 test: $(TEST_BINS)
@@ -54,7 +62,7 @@ fuzz: $(FUZZ_BINS)
 	@echo "  $(FUZZ_DIR)/fuzz_bn -max_total_time=120"
 	@echo "  $(FUZZ_DIR)/fuzz_rsa -runs=10000 -seed=1"
 
-$(FUZZ_DIR)/%: $(FUZZ_DIR)/%.c
+$(FUZZ_DIR)/%$(EXE): $(FUZZ_DIR)/%.c
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer,address,undefined -o $@ $< $(SRC_FILES) $(LDFLAGS)
 
 asan-test:
@@ -75,5 +83,6 @@ $(LIB): $(OBJ_FILES)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(TEST_BINS) $(INTEROP_BINS) $(TEST_DIR)/gen_cert $(TEST_DIR)/cert_0_0_0_0.der \
-	      $(OBJ_FILES) $(LIB) $(FUZZ_BINS) $(TEST_DIR)/asan-*
+	rm -f $(TEST_BINS) $(INTEROP_BINS) $(TEST_DIR)/gen_cert$(EXE) $(TEST_DIR)/cert_0_0_0_0.der \
+	      $(OBJ_FILES) $(LIB) $(FUZZ_BINS) $(TEST_DIR)/asan-* \
+	      $(TEST_DIR)/*.exe $(FUZZ_DIR)/*.exe

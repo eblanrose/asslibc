@@ -1,7 +1,5 @@
 #include <pthread.h>
-#include <signal.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "testsocket.h"
 
 #include "utest.h"
 #include "asslibc.h"
@@ -41,7 +39,7 @@ static void *good_server(void *a) {
     if (p->hs_result == 0 && p->echo) echo_loop(&s, p->fd);
     assl_rsa_free(p->key);
     p->key = NULL;
-    close(p->fd);
+    tst_fd_close(p->fd);
     return NULL;
 }
 
@@ -61,7 +59,7 @@ static void *relay_thread(void *a) {
     for (;;) {
         size_t h = 0;
         while (h < 5) {
-            ssize_t k = read(r->in, hdr + h, 5 - h);
+            ssize_t k = tst_fd_read(r->in, hdr + h, 5 - h);
             if (k <= 0) goto done;
             h += (size_t)k;
         }
@@ -71,7 +69,7 @@ static void *relay_thread(void *a) {
         if (!body) break;
         size_t got = 0;
         while (got < n) {
-            ssize_t k = read(r->in, body + got, n - got);
+            ssize_t k = tst_fd_read(r->in, body + got, n - got);
             if (k <= 0) { free(body); goto done; }
             got += (size_t)k;
         }
@@ -89,12 +87,12 @@ static void *relay_thread(void *a) {
             body[n - 1] ^= 0x01;
             r->flipped = 1;
         }
-        if (write(r->out, hdr, 5) != 5) { free(body); break; }
-        if (n && write(r->out, body, n) != (ssize_t)n) { free(body); break; }
+        if (tst_fd_write(r->out, hdr, 5) != 5) { free(body); break; }
+        if (n && tst_fd_write(r->out, body, n) != (ssize_t)n) { free(body); break; }
         free(body);
     }
 done:
-    shutdown(r->out, SHUT_WR);
+    tst_fd_shutdown_wr(r->out);
     return NULL;
 }
 
@@ -102,7 +100,7 @@ static void drain(int fd, int max_bytes) {
     uint8_t junk[4096];
     int total = 0;
     while (total < max_bytes) {
-        ssize_t r = read(fd, junk, sizeof junk);
+        ssize_t r = tst_fd_read(fd, junk, sizeof junk);
         if (r <= 0) break;
         total += (int)r;
     }
@@ -110,8 +108,8 @@ static void drain(int fd, int max_bytes) {
 
 static int write_raw(int fd, uint8_t type, const uint8_t *body, size_t len) {
     uint8_t hdr[5] = { type, 3, 3, (uint8_t)(len >> 8), (uint8_t)len };
-    if (write(fd, hdr, 5) != 5) return -1;
-    if (len && write(fd, body, len) != (ssize_t)len) return -1;
+    if (tst_fd_write(fd, hdr, 5) != 5) return -1;
+    if (len && tst_fd_write(fd, body, len) != (ssize_t)len) return -1;
     return 0;
 }
 
@@ -127,11 +125,11 @@ static size_t hs_msg(uint8_t *out, uint8_t type, const uint8_t *payload, size_t 
 
 static int server_rejects(const uint8_t *ch_body, size_t ch_len) {
     int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return -1;
+    if (testsocketpair(sv) != 0) return -1;
 
     assl_rsa_key *k = malloc(sizeof *k);
     assl_rsa_init(k);
-    if (assl_rsa_keygen(k, 2048) < 0) { free(k); close(sv[0]); close(sv[1]); return -1; }
+    if (assl_rsa_keygen(k, 2048) < 0) { free(k); tst_fd_close(sv[0]); tst_fd_close(sv[1]); return -1; }
 
     peer_arg pa = { .fd = sv[0], .key = k, .version = TLS12_VERSION, .hs_result = -99 };
     pthread_t th;
@@ -140,14 +138,14 @@ static int server_rejects(const uint8_t *ch_body, size_t ch_len) {
     if (write_raw(sv[1], SSL3_CT_HANDSHAKE, ch_body, ch_len) < 0) {
         pthread_join(th, NULL);
         assl_rsa_free(k); free(k);
-        close(sv[0]); close(sv[1]);
+        tst_fd_close(sv[0]); tst_fd_close(sv[1]);
         return -1;
     }
-    shutdown(sv[1], SHUT_WR);
+    tst_fd_shutdown_wr(sv[1]);
 
     drain(sv[1], 1 << 20);
     pthread_join(th, NULL);
-    close(sv[1]);
+    tst_fd_close(sv[1]);
 
     int rejected = (pa.hs_result < 0);
     assl_rsa_free(k);
@@ -265,7 +263,7 @@ static void test_ch_wrong_type(void) {
     (void)n;
     {
         int sv[2];
-        utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+        utest_bool(testsocketpair(sv) == 0, "socketpair");
         assl_rsa_key *k = malloc(sizeof *k);
         assl_rsa_init(k);
         if (assl_rsa_keygen(k, 2048) == 0) {
@@ -275,13 +273,13 @@ static void test_ch_wrong_type(void) {
             p = ch_prefix(b);
             n = hs_msg(msg, SSL3_HS_CLIENT_HELLO, b, p);
             write_raw(sv[1], SSL3_CT_APPLICATION_DATA, msg, n);
-            shutdown(sv[1], SHUT_WR);
+            tst_fd_shutdown_wr(sv[1]);
             pthread_join(th, NULL);
             utest_bool(pa.hs_result < 0, "app-data record rejected as ClientHello");
             assl_rsa_free(k);
             free(k);
         }
-        close(sv[0]); close(sv[1]);
+        tst_fd_close(sv[0]); tst_fd_close(sv[1]);
     }
 
     utest_end();
@@ -291,7 +289,7 @@ static void test_ch_wrong_type(void) {
 static void test_record_framing(void) {
     utest_begin("record-framing");
     int sv[2];
-    utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+    utest_bool(testsocketpair(sv) == 0, "socketpair");
 
     assl_rsa_key *k = malloc(sizeof *k);
     assl_rsa_init(k);
@@ -302,12 +300,12 @@ static void test_record_framing(void) {
     pthread_create(&th, NULL, good_server, &pa);
 
     uint8_t hdr[5] = { SSL3_CT_HANDSHAKE, 3, 3, 0xFF, 0xFF };
-    ssize_t w = write(sv[1], hdr, 5);
+    ssize_t w = tst_fd_write(sv[1], hdr, 5);
     utest_bool(w == 5, "wrote oversized header");
     pthread_join(th, NULL);
     utest_bool(pa.hs_result < 0, "oversized record length rejected");
 
-    close(sv[0]); close(sv[1]);
+    tst_fd_close(sv[0]); tst_fd_close(sv[1]);
     assl_rsa_free(k); free(k);
     utest_end();
 }
@@ -315,7 +313,7 @@ static void test_record_framing(void) {
 static void test_read_semantics(void) {
     utest_begin("read-semantics");
     int sv[2];
-    utest_bool(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+    utest_bool(testsocketpair(sv) == 0, "socketpair");
 
     assl_rsa_key *k = malloc(sizeof *k);
     assl_rsa_init(k);
@@ -370,7 +368,7 @@ static void test_read_semantics(void) {
     }
 
     pthread_join(th, NULL);
-    close(sv[0]); close(sv[1]);
+    tst_fd_close(sv[0]); tst_fd_close(sv[1]);
     assl_rsa_free(k); free(k);
     utest_end();
 }
@@ -423,7 +421,7 @@ static void test_finished_verified(void) {
 
     {
         int sv[2];
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+        if (testsocketpair(sv) == 0) {
             assl_rsa_key *k = malloc(sizeof *k);
             assl_rsa_init(k);
             if (assl_rsa_keygen(k, 2048) == 0) {
@@ -444,15 +442,15 @@ static void test_finished_verified(void) {
             }
             assl_rsa_free(k);
             free(k);
-            close(sv[0]); close(sv[1]);
+            tst_fd_close(sv[0]); tst_fd_close(sv[1]);
         }
     }
 
     for (int dir = 0; dir < 2; dir++) {
         int c2s[2], s2c[2];
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, c2s) != 0) break;
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, s2c) != 0) {
-            close(c2s[0]); close(c2s[1]); break;
+        if (testsocketpair(c2s) != 0) break;
+        if (testsocketpair(s2c) != 0) {
+            tst_fd_close(c2s[0]); tst_fd_close(c2s[1]); break;
         }
 
         assl_rsa_key *k = malloc(sizeof *k);
@@ -484,22 +482,22 @@ static void test_finished_verified(void) {
             utest_bool(down.flipped == 1, "relay corrupted the server Finished");
             utest_bool(cr < 0, "client rejected a corrupted Finished");
         }
-        close(c2s[0]);
+        tst_fd_close(c2s[0]);
 
 
         pthread_join(tup, NULL);
         pthread_join(tdown, NULL);
         pthread_join(th, NULL);
 
-        close(c2s[1]); close(s2c[0]); close(s2c[1]);
+        tst_fd_close(c2s[1]); tst_fd_close(s2c[0]); tst_fd_close(s2c[1]);
         assl_rsa_free(k);
         free(k);
     }
 
     {
         int c2s[2], s2c[2];
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, c2s) == 0 &&
-            socketpair(AF_UNIX, SOCK_STREAM, 0, s2c) == 0) {
+        if (testsocketpair(c2s) == 0 &&
+            testsocketpair(s2c) == 0) {
 
             assl_rsa_key *k = malloc(sizeof *k);
             assl_rsa_init(k);
@@ -520,7 +518,7 @@ static void test_finished_verified(void) {
                 assl_ssl_set_version(&c, TLS12_VERSION);
                 assl_ssl_set_cert(&c, (const uint8_t *)"dummy", 5, k);
                 int cr = assl_ssl_handshake(&c, c2s[0], c2s[0]);
-                close(c2s[0]);
+                tst_fd_close(c2s[0]);
 
                 pthread_join(tup, NULL);
                 pthread_join(tdown, NULL);
@@ -532,7 +530,7 @@ static void test_finished_verified(void) {
                 utest_bool(cr != 0,
                            "client did not accept a tampered transcript");
 
-                close(c2s[1]); close(s2c[0]); close(s2c[1]);
+                tst_fd_close(c2s[1]); tst_fd_close(s2c[0]); tst_fd_close(s2c[1]);
             }
             assl_rsa_free(k);
             free(k);
@@ -548,9 +546,9 @@ static void test_ccs_validated(void) {
 
     for (int dir = 0; dir < 2; dir++) {
         int c2s[2], s2c[2];
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, c2s) != 0) break;
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, s2c) != 0) {
-            close(c2s[0]); close(c2s[1]); break;
+        if (testsocketpair(c2s) != 0) break;
+        if (testsocketpair(s2c) != 0) {
+            tst_fd_close(c2s[0]); tst_fd_close(c2s[1]); break;
         }
 
         assl_rsa_key *k = malloc(sizeof *k);
@@ -575,7 +573,7 @@ static void test_ccs_validated(void) {
         assl_ssl_set_version(&c, TLS12_VERSION);
         assl_ssl_set_cert(&c, (const uint8_t *)"dummy", 5, k);
         int cr = assl_ssl_handshake(&c, c2s[0], c2s[0]);
-        close(c2s[0]);
+        tst_fd_close(c2s[0]);
         pthread_join(tup, NULL);
         pthread_join(tdown, NULL);
         pthread_join(th, NULL);
@@ -588,7 +586,7 @@ static void test_ccs_validated(void) {
             utest_bool(cr < 0, "client rejected a malformed CCS");
         }
 
-        close(c2s[1]); close(s2c[0]); close(s2c[1]);
+        tst_fd_close(c2s[1]); tst_fd_close(s2c[0]); tst_fd_close(s2c[1]);
         assl_rsa_free(k);
         free(k);
     }
@@ -598,7 +596,7 @@ static void test_ccs_validated(void) {
 
 
 int main(void) {
-    signal(SIGPIPE, SIG_IGN);
+    tst_ignore_sigpipe();
 
     if (!utest_need_rng()) {
         printf("SKIP: no /dev/urandom\n");

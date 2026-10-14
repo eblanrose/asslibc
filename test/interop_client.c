@@ -1,11 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "testsocket.h"
 #include "asslibc.h"
 #include "../ssl.h"
 
@@ -15,7 +11,7 @@ static const uint8_t k_alpn[] = {
 };
 
 int main(int argc, char **argv) {
-    signal(SIGPIPE, SIG_IGN);
+    tst_ignore_sigpipe();
     if (argc < 4) {
         fprintf(stderr, "usage: %s <host> <port> <tls1.3|tls1.2> [servername]\n", argv[0]);
         return 2;
@@ -25,8 +21,8 @@ int main(int argc, char **argv) {
     uint16_t want_version = TLS13_VERSION;
     if (strcmp(argv[3], "tls1.2") == 0) want_version = TLS12_VERSION;
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { perror("socket"); return 1; }
+    tst_sock fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (!tst_sock_ok(fd)) { perror("socket"); return 1; }
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
@@ -68,6 +64,6 @@ int main(int argc, char **argv) {
 
     assl_ssl_write(&ssl, fd, "quit", 4);
     assl_ssl_shutdown(&ssl, fd);
-    close(fd);
+    tst_fd_close(fd);
     return 0;
 }

@@ -1,11 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "testsocket.h"
 #include "asslibc.h"
 #include "../ssl.h"
 
@@ -60,7 +56,7 @@ static uint8_t *read_file(const char *path, size_t *len) {
 }
 
 int main(int argc, char **argv) {
-    signal(SIGPIPE, SIG_IGN);
+    tst_ignore_sigpipe();
     if (argc < 3) {
         fprintf(stderr, "usage: %s <port> <tls1.3|tls1.2|any>\n", argv[0]);
         return 2;
@@ -69,10 +65,10 @@ int main(int argc, char **argv) {
     uint16_t want_version = TLS13_VERSION;
     if (strcmp(argv[2], "tls1.2") == 0) want_version = TLS12_VERSION;
 
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0) { perror("socket"); return 1; }
+    tst_sock ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (!tst_sock_ok(ls)) { perror("socket"); return 1; }
     int one = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
@@ -82,8 +78,8 @@ int main(int argc, char **argv) {
     if (listen(ls, 1) < 0) { perror("listen"); return 1; }
     fprintf(stderr, "interop_server: listening on 127.0.0.1:%d\n", port);
 
-    int fd = accept(ls, NULL, NULL);
-    if (fd < 0) { perror("accept"); return 1; }
+    tst_sock fd = accept(ls, NULL, NULL);
+    if (!tst_sock_ok(fd)) { perror("accept"); return 1; }
 
     size_t cert_len = 0;
     uint8_t *cert = read_file("cert_0_0_0_0.der", &cert_len);
@@ -128,8 +124,8 @@ int main(int argc, char **argv) {
         }
     }
     assl_ssl_shutdown(&ssl, fd);
-    close(fd);
-    close(ls);
+    tst_fd_close(fd);
+    tst_fd_close(ls);
     printf("OK\n");
     return 0;
 }

@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <pthread.h>
+#include "testsocket.h"
 #include "utest.h"
 #include "asslibc.h"
 #include "../ssl.h"
@@ -87,8 +87,8 @@ static void run_client(assl_rsa_key *server_key, const uint8_t *srv_der,
                        const char *name) {
     utest_begin(name);
     int c2s[2], s2c[2];
-    utest_bool(pipe(c2s) == 0, "pipe_c2s");
-    utest_bool(pipe(s2c) == 0, "pipe_s2c");
+    utest_bool(testsocketpair(c2s) == 0, "pipe_c2s");
+    utest_bool(testsocketpair(s2c) == 0, "pipe_s2c");
 
     srv_arg a = {
         .rd_fd = c2s[0], .wr_fd = s2c[1], .key = server_key,
@@ -116,7 +116,7 @@ static void run_client(assl_rsa_key *server_key, const uint8_t *srv_der,
     utest_bool((rc == 0) == expect_ok, "handshake_result");
 
     pthread_join(th, NULL);
-    close(c2s[0]); close(c2s[1]); close(s2c[0]); close(s2c[1]);
+    tst_fd_close(c2s[0]); tst_fd_close(c2s[1]); tst_fd_close(s2c[0]); tst_fd_close(s2c[1]);
     utest_end();
 }
 

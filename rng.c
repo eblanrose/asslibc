@@ -1,23 +1,28 @@
 #include "asslibc.h"
 #include <pthread.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#endif
+
 /* ---- OS entropy sources ----
- * Uses POSIX getentropy() where available, then falls back to reading
- * /dev/urandom (and /dev/random as a last resort).  Returns 0 on success,
+ * Windows:   BCryptGenRandom() from bcrypt.dll (Vista+).
+ * POSIX:     read /dev/urandom (falls back to /dev/random).
+ * No getentropy() anywhere: it is missing or broken on several libcs
+ * (musl, bionic), so we deliberately avoid it.  Returns 0 on success,
  * -1 when no OS entropy source is available. */
 static int os_entropy(uint8_t *out, size_t len) {
-#if ASSL_HAVE_GETENTROPY
-    {
-        size_t got = 0;
-        while (got < len) {
-            size_t chunk = len - got;
-            if (chunk > 256) chunk = 256;
-            if (getentropy(out + got, chunk) != 0) break;
-            got += chunk;
-        }
-        if (got == len) return 0;
+#if defined(_WIN32)
+    while (len > 0) {
+        ULONG chunk = len > 0x3FFFFFFFul ? 0x3FFFFFFFul : (ULONG)len;
+        if (BCryptGenRandom(NULL, out, chunk, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+            return -1;
+        out += chunk;
+        len -= chunk;
     }
-#endif
+    return 0;
+#else
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd < 0) fd = open("/dev/random", O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
@@ -38,6 +43,7 @@ static int os_entropy(uint8_t *out, size_t len) {
     }
     close(fd);
     return 0;
+#endif
 }
 
 #define ASSL_RNG_KEY_LEN    32

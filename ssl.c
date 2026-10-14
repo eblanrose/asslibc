@@ -1,4 +1,5 @@
 #include "ssl.h"
+#include "assl_io.h"
 
 
 /* ---- Cipher suite table ---- */
@@ -242,9 +243,9 @@ static int ssl3_write_all(int fd, const void *buf, size_t len) {
     const uint8_t *p = (const uint8_t *)buf;
     size_t done = 0;
     while (done < len) {
-        ssize_t n = write(fd, p + done, len - done);
+        ssize_t n = assl_io_write(fd, p + done, len - done);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (assl_io_eintr()) continue;
             return -1;
         }
         if (n == 0) return -1;
@@ -255,9 +256,9 @@ static int ssl3_write_all(int fd, const void *buf, size_t len) {
 
 static ssize_t ssl3_read_some(int fd, void *buf, size_t len) {
     for (;;) {
-        ssize_t n = read(fd, buf, len);
+        ssize_t n = assl_io_read(fd, buf, len);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (assl_io_eintr()) continue;
             return -1;
         }
         return n;
